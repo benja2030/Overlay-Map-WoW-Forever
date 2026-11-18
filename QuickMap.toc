@@ -1,8 +1,0 @@
-## Interface: 16001
-## Title: Quick Map
-## Notes: Shows the map of your zone with a key, without borders, buttons or quest log. Size, shape, opacity, position and hold or press can be changed.
-## Author: benja2030
-## Version: 1.0.0
-## SavedVariables: QuickMapDB
-
-QuickMap.lua

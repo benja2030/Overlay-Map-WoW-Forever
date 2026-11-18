@@ -1,4 +1,4 @@
-# Quick Map
+# Overlay Map
 
 *(Instrucciones en español más abajo.)*
 
@@ -11,7 +11,13 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 - **Hold or press**: the map shows while you hold the key, or one press shows it and the next hides it.
 - **Size and width**: make the map bigger or smaller, and narrower (more square) or wider.
 - **Two opacities**: one for the map itself and one for the markers on it, so the map can fade into the background while quests and vendors stay clear. Hovering a marker shows its name, as on the normal map.
-- **Keep opacity while moving**: the game fades its map while you move; Quick Map keeps the opacity you chose (or fades to half, if you prefer).
+- **Overlay mode**: one switch that makes it big, in the middle of the screen, see-through and click-through, with solid markers and large soft edges. Turning it off puts back what you had.
+- **Click through**: the mouse goes through the map to the world, so you can still click and turn your character with the right button over it. Markers still show their names; hold Shift to drag and zoom the map. Overlay mode turns it on.
+- **Markers only**: set the map's opacity to 0% and only the markers float over the world.
+- **Remember zoom**: opens at the zoom it had when you last closed it, apart from the normal map's.
+- **Soft edges**: the map fades out towards its edges, like the overlay maps of other games, in the shape of a rounded rectangle, a diamond or an oval (off, small, medium, large or very large).
+- **Torn Parchment style**: torn, burnt paper edges, like an old map, instead of the soft edges.
+- **Keep opacity while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
 - **Follow me**: keeps the map centred on you while it's open, like the minimap.
 - **Hide the minimap** while the map is open (SexyMap's minimap too).
 - **Also hide** other parts of the interface while the map is open: action bars, player and target frames, chat, quest tracker, buffs, menu and bags, experience bar. Each one is its own option.
@@ -22,26 +28,36 @@ When the map closes, everything goes back exactly as it was: the normal map (M) 
 
 ## Installation
 
-1. Put the `QuickMap` folder inside `World of Warcraft\_forever_\Interface\AddOns\` (the game folder's name may vary; it must be the WoW: Forever installation).
-2. It must end up like this: `...\Interface\AddOns\QuickMap\QuickMap.toc`. Make sure there is no extra folder in between, like `QuickMap\QuickMap\`.
-3. In the game, choose a key in **Options > Keybindings > Quick Map > Show the map**.
+1. Put the `OverlayMap` folder inside `World of Warcraft\_forever_\Interface\AddOns\` (the game folder's name may vary; it must be the WoW: Forever installation).
+2. It must end up like this: `...\Interface\AddOns\OverlayMap\OverlayMap.toc`. Make sure there is no extra folder in between, like `OverlayMap\OverlayMap\`.
+3. In the game, choose a key in **Options > Keybindings > Overlay Map > Show the map**.
+
+## Coming from Quick Map
+
+Overlay Map was called Quick Map before. It's installed as a new addon, so:
+
+1. Remove the old `QuickMap` folder from `Interface\AddOns\`.
+2. Choose your key again in **Options > Keybindings > Overlay Map**.
+3. To keep your settings: with the game closed, go to `World of Warcraft\_forever_\WTF\Account\(your account)\SavedVariables\` and rename `QuickMap.lua` to `OverlayMap.lua`. Overlay Map takes them over the next time you log in.
+
+The commands are now `/omap` and `/overlaymap`.
 
 ## Options and commands
 
-All the options are in **Options > AddOns > Quick Map**. Most of them are also in the small panel that the arrow button on the map opens. In that panel, size and width change when you press **Apply Size & Width**.
+All the options are in **Options > AddOns > Overlay Map**. Most of them are also in the small panel that the arrow button on the map opens. In that panel, size and width change when you press **Apply Size & Width**.
 
 | Command | What it does |
 |---|---|
-| `/qmap` | Opens the options |
-| `/qmap move` | Shows a box the size of the map: drag it, right-click it when done |
-| `/qmap reset` | Puts the map back in the middle of the screen |
-| `/qmap debug` | Shows what the map looks like from the inside (useful when reporting a problem) |
+| `/omap` | Opens the options |
+| `/omap move` | Shows a box the size of the map: drag it, right-click it when done |
+| `/omap reset` | Puts the map back in the middle of the screen |
+| `/omap debug` | Shows what the map looks like from the inside (useful when reporting a problem) |
 
-`/quickmap` works too.
+`/overlaymap` works too.
 
 ## Other addons
 
-- **OpenMap**: works with it. OpenMap keeps the map window where it saved it, so Quick Map moves only the map inside it. Leave OpenMap's own "fade while moving" at 0 and use Quick Map's instead, or the two will fight while you walk. With OpenMap, changing the width shows more or less of the world at the sides instead of zooming.
+- **OpenMap**: works with it. OpenMap keeps the map window where it saved it, so Overlay Map moves only the map inside it. Leave OpenMap's own "fade while moving" at 0 and use Overlay Map's instead, or the two will fight while you walk. With OpenMap, changing the width shows more or less of the world at the sides instead of zooming.
 - **Questie**: its markers show on the map and take the objectives' opacity.
 - **SexyMap**: its minimap (with its clock, zone name and buttons) is hidden with the rest.
 
@@ -54,10 +70,10 @@ All the options are in **Options > AddOns > Quick Map**. Most of them are also i
 
 ## If the addon stops loading
 
-After a WoW: Forever update, the addon may stop loading. At character select, open the AddOns list and find Quick Map:
+After a WoW: Forever update, the addon may stop loading. At character select, open the AddOns list and find Overlay Map:
 
 - **"Out of date"**: check **Load out of date AddOns** at the top of the list. That's all.
-- **"Incompatible"**: in the game, type `/dump select(4, GetBuildInfo())` in chat. It prints a number, for example 16001. Open `QuickMap.toc` with Notepad, replace the number in the first line (`## Interface: 16001`) with that one, save, and restart the game. Never put an invented number there: the game marks it Incompatible and it won't load at all.
+- **"Incompatible"**: in the game, type `/dump select(4, GetBuildInfo())` in chat. It prints a number, for example 16001. Open `OverlayMap.toc` with Notepad, replace the number in the first line (`## Interface: 16001`) with that one, save, and restart the game. Never put an invented number there: the game marks it Incompatible and it won't load at all.
 
 ## License
 
@@ -65,7 +81,7 @@ MIT. See `LICENSE`.
 
 ---
 
-# Quick Map (español)
+# Overlay Map (español)
 
 Muestra el mapa de tu zona con una tecla, en **WoW: Forever**, sin los bordes, botones ni el registro de misiones a su alrededor. Mantén la tecla para echar un vistazo rápido, o presiónala para dejar el mapa abierto. El tamaño, la forma, la opacidad y su lugar en pantalla los eliges tú.
 
@@ -76,7 +92,13 @@ Usa el mapa del propio juego, así que todo lo que hay en él también se ve: mi
 - **Mantener o presionar**: el mapa se ve mientras mantienes la tecla, o una pulsación lo abre y la siguiente lo cierra.
 - **Tamaño y ancho**: el mapa más grande o más chico, y más angosto (más cuadrado) o más ancho.
 - **Dos opacidades**: una para el mapa y otra para los indicadores, así el mapa puede quedar de fondo mientras las misiones y vendedores se ven claros. Al pasar el mouse sobre un indicador se ve su nombre, como en el mapa normal.
-- **Mantener la opacidad al moverse**: el juego desvanece su mapa mientras caminas; Quick Map mantiene la opacidad que elegiste (o la baja a la mitad, si lo prefieres).
+- **Modo superpuesto**: un interruptor que lo deja grande, al centro de la pantalla, transparente y con clic a través, con los indicadores sólidos y bordes suaves grandes. Al apagarlo vuelve lo que tenías.
+- **Clic a través**: el mouse atraviesa el mapa hacia el mundo, así puedes seguir haciendo clic y girar a tu personaje con el botón derecho sobre él. Los indicadores siguen mostrando sus nombres; mantén Shift para arrastrar el mapa y hacer zoom. El modo superpuesto lo activa.
+- **Solo indicadores**: con la opacidad del mapa en 0%, solo los indicadores flotan sobre el mundo.
+- **Recordar el zoom**: abre con el zoom que tenía la última vez que lo cerraste, aparte del mapa normal.
+- **Bordes suaves**: el mapa se desvanece hacia sus bordes, como los mapas superpuestos de otros juegos, con forma de rectángulo redondeado, rombo u óvalo (apagado, pequeño, mediano, grande o muy grande).
+- **Estilo pergamino rasgado (Torn Parchment)**: bordes de papel rasgado y quemado, como un mapa antiguo, en vez de los bordes suaves.
+- **Mantener la opacidad al moverse**: el juego desvanece su mapa mientras caminas; Overlay Map mantiene la opacidad que elegiste (o la baja a la mitad, si lo prefieres).
 - **Seguirme**: mantiene el mapa centrado en ti mientras está abierto, como el minimapa.
 - **Ocultar el minimapa** mientras el mapa está abierto (también el de SexyMap).
 - **Ocultar también** otras partes de la interfaz mientras el mapa está abierto: barras de acción, marcos del jugador y del objetivo, chat, seguimiento de misiones, beneficios, menú y bolsas, barra de experiencia. Cada una es una opción aparte.
@@ -87,26 +109,36 @@ Al cerrar el mapa todo vuelve a quedar exactamente como estaba: el mapa normal (
 
 ## Instalación
 
-1. Pon la carpeta `QuickMap` dentro de `World of Warcraft\_forever_\Interface\AddOns\` (el nombre de la carpeta del juego puede variar; tiene que ser la instalación de WoW: Forever).
-2. Tiene que quedar así: `...\Interface\AddOns\QuickMap\QuickMap.toc`. Revisa que no quede una carpeta de más en medio, como `QuickMap\QuickMap\`.
-3. En el juego, elige una tecla en **Opciones > Keybindings > Quick Map > Show the map**.
+1. Pon la carpeta `OverlayMap` dentro de `World of Warcraft\_forever_\Interface\AddOns\` (el nombre de la carpeta del juego puede variar; tiene que ser la instalación de WoW: Forever).
+2. Tiene que quedar así: `...\Interface\AddOns\OverlayMap\OverlayMap.toc`. Revisa que no quede una carpeta de más en medio, como `OverlayMap\OverlayMap\`.
+3. En el juego, elige una tecla en **Opciones > Keybindings > Overlay Map > Show the map**.
+
+## Si usabas Quick Map
+
+Overlay Map antes se llamaba Quick Map. Se instala como un addon nuevo, así que:
+
+1. Borra la carpeta antigua `QuickMap` de `Interface\AddOns\`.
+2. Vuelve a elegir tu tecla en **Opciones > Keybindings > Overlay Map**.
+3. Para conservar tu configuración: con el juego cerrado, ve a `World of Warcraft\_forever_\WTF\Account\(tu cuenta)\SavedVariables\` y cambia el nombre de `QuickMap.lua` a `OverlayMap.lua`. Overlay Map la toma la próxima vez que entres.
+
+Los comandos ahora son `/omap` y `/overlaymap`.
 
 ## Opciones y comandos
 
-Todas las opciones están en **Opciones > AddOns > Quick Map**. La mayoría también están en el panel pequeño que abre el botón con la flecha en el mapa. En ese panel, el tamaño y el ancho cambian al presionar **Apply Size & Width**.
+Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría también están en el panel pequeño que abre el botón con la flecha en el mapa. En ese panel, el tamaño y el ancho cambian al presionar **Apply Size & Width**.
 
 | Comando | Qué hace |
 |---|---|
-| `/qmap` | Abre las opciones |
-| `/qmap move` | Muestra un recuadro del tamaño del mapa: arrástralo y haz clic derecho al terminar |
-| `/qmap reset` | Devuelve el mapa al centro de la pantalla |
-| `/qmap debug` | Muestra cómo está el mapa por dentro (útil para reportar un problema) |
+| `/omap` | Abre las opciones |
+| `/omap move` | Muestra un recuadro del tamaño del mapa: arrástralo y haz clic derecho al terminar |
+| `/omap reset` | Devuelve el mapa al centro de la pantalla |
+| `/omap debug` | Muestra cómo está el mapa por dentro (útil para reportar un problema) |
 
-`/quickmap` también funciona.
+`/overlaymap` también funciona.
 
 ## Otros addons
 
-- **OpenMap**: funciona con él. OpenMap mantiene la ventana del mapa donde la guardó, así que Quick Map mueve solo el mapa que está dentro. Deja el "desvanecer al moverse" de OpenMap en 0 y usa el de Quick Map, o los dos pelearán mientras caminas. Con OpenMap, cambiar el ancho muestra más o menos mundo a los lados en vez de hacer zoom.
+- **OpenMap**: funciona con él. OpenMap mantiene la ventana del mapa donde la guardó, así que Overlay Map mueve solo el mapa que está dentro. Deja el "desvanecer al moverse" de OpenMap en 0 y usa el de Overlay Map, o los dos pelearán mientras caminas. Con OpenMap, cambiar el ancho muestra más o menos mundo a los lados en vez de hacer zoom.
 - **Questie**: sus indicadores se ven en el mapa y usan la opacidad de los objetivos.
 - **SexyMap**: su minimapa (con su reloj, nombre de zona y botones) se oculta junto con lo demás.
 
@@ -119,10 +151,10 @@ Todas las opciones están en **Opciones > AddOns > Quick Map**. La mayoría tamb
 
 ## Si el addon deja de cargar
 
-Después de una actualización de WoW: Forever, el addon podría dejar de cargar. En la selección de personaje, abre la lista de AddOns y busca Quick Map:
+Después de una actualización de WoW: Forever, el addon podría dejar de cargar. En la selección de personaje, abre la lista de AddOns y busca Overlay Map:
 
 - **"Out of date"**: marca **Load out of date AddOns** arriba de la lista. Con eso basta.
-- **"Incompatible"**: en el juego, escribe `/dump select(4, GetBuildInfo())` en el chat. Te mostrará un número, por ejemplo 16001. Abre `QuickMap.toc` con el Bloc de notas, reemplaza el número de la primera línea (`## Interface: 16001`) por ese, guarda y reinicia el juego. Nunca pongas un número inventado: el juego lo marca como Incompatible y no cargará.
+- **"Incompatible"**: en el juego, escribe `/dump select(4, GetBuildInfo())` en el chat. Te mostrará un número, por ejemplo 16001. Abre `OverlayMap.toc` con el Bloc de notas, reemplaza el número de la primera línea (`## Interface: 16001`) por ese, guarda y reinicia el juego. Nunca pongas un número inventado: el juego lo marca como Incompatible y no cargará.
 
 ## Licencia
 
