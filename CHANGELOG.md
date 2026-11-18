@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1 (2026-11-18)
+
+### New
+
+- **Also hide: Character Names**: the names above players', NPCs' and pets' heads are hidden while the map is open, and come back as they were when it closes. (The game doesn't allow changing them in combat: then it waits for combat to end.)
+
+### Fixed
+
+- The soft edges shape did nothing with Soft Edges off. Now a diamond or an oval cuts the map sharp in that shape.
+- Without OpenMap, the map could open in a corner of the screen the first time (with the options button out of reach), and away from the game's usual map window it was cut off, and seemed to move when resized. The map is now placed from the middle of the screen, and its invisible window covers the whole screen while Overlay Map shows it, so the map can be anywhere.
+- Without OpenMap, zooming all the way out left empty margins around the map, which looked broken with soft edges or Torn Parchment (more so with Follow me). While Overlay Map shows the map, the furthest zoom is now the one where the map fills its area.
+- A part of the interface hidden by Overlay Map blinked when another addon tried to show it, like UI Visibility's "On hover" on the quest tracker. It's now kept invisible the moment that happens.
+
 ## 1.1.0 (2026-11-18)
 
 ### Renamed

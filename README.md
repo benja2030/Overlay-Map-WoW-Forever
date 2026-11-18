@@ -20,7 +20,7 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 - **Keep opacity while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
 - **Follow me**: keeps the map centred on you while it's open, like the minimap.
 - **Hide the minimap** while the map is open (SexyMap's minimap too).
-- **Also hide** other parts of the interface while the map is open: action bars, player and target frames, chat, quest tracker, buffs, menu and bags, experience bar. Each one is its own option.
+- **Also hide** other parts of the interface while the map is open: action bars, player and target frames, chat, quest tracker, buffs, menu and bags, experience bar, and the names above characters' heads. Each one is its own option.
 - **Move it** anywhere on screen.
 - **Options button** in the corner of the map, which opens a small panel to change all of this while you look at the map. It can show always, only with the mouse over the map, or never, at the opacity you choose.
 
@@ -101,7 +101,7 @@ Usa el mapa del propio juego, así que todo lo que hay en él también se ve: mi
 - **Mantener la opacidad al moverse**: el juego desvanece su mapa mientras caminas; Overlay Map mantiene la opacidad que elegiste (o la baja a la mitad, si lo prefieres).
 - **Seguirme**: mantiene el mapa centrado en ti mientras está abierto, como el minimapa.
 - **Ocultar el minimapa** mientras el mapa está abierto (también el de SexyMap).
-- **Ocultar también** otras partes de la interfaz mientras el mapa está abierto: barras de acción, marcos del jugador y del objetivo, chat, seguimiento de misiones, beneficios, menú y bolsas, barra de experiencia. Cada una es una opción aparte.
+- **Ocultar también** otras partes de la interfaz mientras el mapa está abierto: barras de acción, marcos del jugador y del objetivo, chat, seguimiento de misiones, beneficios, menú y bolsas, barra de experiencia, y los nombres sobre las cabezas de los personajes. Cada una es una opción aparte.
 - **Moverlo** a cualquier parte de la pantalla.
 - **Botón de opciones** en la esquina del mapa, que abre un panel pequeño para cambiar todo esto mientras miras el mapa. Puede verse siempre, solo con el mouse sobre el mapa, o nunca, con la opacidad que elijas.
 

@@ -24,6 +24,7 @@ local DEFAULTS = {
     overlay = false, -- overlay mode: big, in the middle, see-through, soft edges
     hideBars = false, hideUnits = false, hideChat = false, hideQuests = false, -- other parts of the
     hideBuffs = false, hideMenu = false, hideXP = false,                       -- interface hidden too
+    hideNames = false, -- the names above characters' heads, hidden while the map is open
     buttonMode = "hover", -- the options button on the map: "show", "hover" (with the mouse over the map), "hide"
     buttonOpacity = 0.8,     -- with the mouse over the map (or always, with "show")
     buttonNearOpacity = 1,   -- with the mouse on the button or right next to it
@@ -135,33 +136,37 @@ local function OpenMapLoaded()
     return loaded and loaded("OpenMap") and true or false
 end
 
-local function AnchorCanvas()
-    local map, c = Map(), Canvas()
-    c:ClearAllPoints()
-    if OpenMapLoaded() then
-        local k = UIParent:GetEffectiveScale() / c:GetEffectiveScale()
-        c:SetPoint("CENTER", UIParent, "CENTER", db.x * k, db.y * k)
-    else
-        c:SetPoint("CENTER", map, "CENTER", 0, 0)
+-- The map area is put at Overlay Map's spot, from the middle of the screen. The game draws the
+-- map window as one picture cut to the window's own rectangle, so the map area only shows where
+-- it lies inside the window. Without OpenMap, the (invisible) window is stretched over the whole
+-- screen while Overlay Map shows it, so the map area can go anywhere. OpenMap keeps the window
+-- where and how big it saved it, so there the window is left as it is.
+local function CoverScreen()
+    local map = Map()
+    if OpenMapLoaded() then return end
+    if not before.windowSize then
+        before.windowSize = { map:GetSize() }
+    end
+    local l, b, w, h = map:GetRect()
+    local ul, ub, uw, uh = UIParent:GetRect()
+    local k = map:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    if not l or math.abs(l * k - ul) > 1 or math.abs(b * k - ub) > 1
+        or math.abs(w * k - uw) > 1 or math.abs(h * k - uh) > 1 then
+        map:ClearAllPoints()
+        map:SetAllPoints(UIParent)
     end
 end
 
+local function AnchorCanvas()
+    local c = Canvas()
+    CoverScreen()
+    c:ClearAllPoints()
+    local k = UIParent:GetEffectiveScale() / c:GetEffectiveScale()
+    c:SetPoint("CENTER", UIParent, "CENTER", db.x * k, db.y * k)
+end
+
 local function Place()
-    local map, canvas = Map(), Canvas()
-    if OpenMapLoaded() then
-        AnchorCanvas()
-        return
-    end
-    map:ClearAllPoints()
-    map:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    -- Move the frame so the map area, not the whole frame, sits at the chosen spot.
-    local fx, fy = map:GetCenter()
-    local cx, cy = canvas:GetCenter()
-    local s = map:GetScale()
-    if fx and cx then
-        map:ClearAllPoints()
-        map:SetPoint("CENTER", UIParent, "CENTER", fx - cx + db.x / s, fy - cy + db.y / s)
-    end
+    AnchorCanvas()
 end
 
 -- Other parts of the interface hidden while the map is open, each group with its own option.
@@ -313,9 +318,44 @@ end
 
 local function ExtrasEnterCombat() end
 
+-- Names above characters' heads (players, NPCs, pets...): the game's own options for them,
+-- turned off while the map is open and put back as they were when it closes. The game doesn't
+-- let addons change them in combat, so then it waits for combat to end. What they were is kept
+-- in the saved settings, so if the game closes with the map open they still come back on the
+-- next login.
+local NAME_CVARS = {
+    "UnitNameFriendlyPlayerName", "UnitNameEnemyPlayerName", "UnitNameHostleNPC",
+    "UnitNameInteractiveNPC", "UnitNameFriendlySpecialNPCName", "UnitNameNPC",
+    "UnitNameFriendlyPetName", "UnitNameEnemyPetName", "UnitNameFriendlyGuardianName",
+    "UnitNameEnemyGuardianName", "UnitNameFriendlyMinionName", "UnitNameEnemyMinionName",
+    "UnitNameFriendlyTotemName", "UnitNameEnemyTotemName", "UnitNameNonCombatCreatureName",
+    "UnitNameOwn",
+}
+
+local function HideNames()
+    if db.namesSaved or InCombatLockdown() then return end
+    local saved = {}
+    for _, name in ipairs(NAME_CVARS) do
+        local value = GetCVar(name)
+        if value ~= nil then
+            saved[name] = value
+            pcall(SetCVar, name, "0")
+        end
+    end
+    db.namesSaved = saved
+end
+
+local function ShowNames()
+    if not db.namesSaved or InCombatLockdown() then return end
+    for name, value in pairs(db.namesSaved) do pcall(SetCVar, name, value) end
+    db.namesSaved = nil
+end
+
 local function ExtrasLeaveCombat()
     for f in pairs(showLater) do pcall(f.Show, f) end
     wipe(showLater)
+    -- (names waiting for combat to end: hidden if the map is open with the option, back if not)
+    if compact and db.hideNames then HideNames() else ShowNames() end
 end
 
 -- The minimap is hidden while the map shows, and shown again only if Overlay Map hid it. Addons
@@ -407,6 +447,33 @@ local function ApplySize()
     SyncLayer()
 end
 
+-- Without OpenMap, the game's map can zoom out until the whole zone fits, leaving empty
+-- margins on the sides or at the top and bottom when the map area isn't the zone's shape. With
+-- soft edges or torn parchment those margins look broken, so while Overlay Map shows the map,
+-- the furthest zoom is the one where the map fills the area. (OpenMap shows the world around the
+-- zone, so it has no margins.)
+local function TrimZoomLevels(c)
+    if not compact or OpenMapLoaded() or type(c.zoomLevels) ~= "table" or not c.mapID then return end
+    local layers = C_Map.GetMapArtLayers(c.mapID)
+    local art = layers and layers[1]
+    if not art or not art.layerWidth or art.layerWidth == 0 or art.layerHeight == 0 then return end
+    local fill = math.max(c:GetWidth() / art.layerWidth, c:GetHeight() / art.layerHeight)
+    local kept = {}
+    for _, level in ipairs(c.zoomLevels) do
+        if level.scale >= fill * 0.999 then kept[#kept + 1] = level end
+    end
+    if not kept[1] or kept[1].scale > fill * 1.001 then
+        table.insert(kept, 1, { scale = fill, layerIndex = (kept[1] and kept[1].layerIndex) or 1 })
+    end
+    c.zoomLevels = kept
+    local ok, now = pcall(c.GetCanvasScale, c)
+    if ok and now and now < fill * 0.999 then
+        local okX, x = pcall(c.GetNormalizedHorizontalScroll, c)
+        local okY, y = pcall(c.GetNormalizedVerticalScroll, c)
+        pcall(c.InstantPanAndZoom, c, fill, okX and x or 0.5, okY and y or 0.5, true)
+    end
+end
+
 local function RestoreSize()
     if not before.points then return end
     local map, c = Map(), Canvas()
@@ -414,7 +481,10 @@ local function RestoreSize()
     c:ClearAllPoints()
     c:SetSize(before.cw, before.ch)
     for _, pt in ipairs(before.points) do c:SetPoint(unpack(pt)) end
-    if appliedW and appliedW ~= before.cw and map.OnFrameSizeChanged then
+    if not OpenMapLoaded() and map.OnFrameSizeChanged then
+        -- (the game's map works out its zoom levels again, as they were)
+        pcall(map.OnFrameSizeChanged, map)
+    elseif appliedW and appliedW ~= before.cw and map.OnFrameSizeChanged then
         pcall(map.OnFrameSizeChanged, map)
     end
     appliedW = nil
@@ -612,7 +682,8 @@ end
 local SHAPE_FILES = { rect = "Edge", diamond = "Diamond", oval = "Oval" }
 local MEDIA = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\"
 local function EdgeFile()
-    -- (the torn parchment's edge is always the same; soft edges come in four widths)
+    -- (the torn parchment's edge is always the same; soft edges come in four widths, and with
+    -- them off a diamond or an oval is cut sharp)
     if db.style == "torn" then return MEDIA .. "Torn" end
     return MEDIA .. (SHAPE_FILES[db.shape] or "Edge") .. db.edge
 end
@@ -691,7 +762,9 @@ end
 
 local function ApplyEdges()
     local torn = db.style == "torn"
-    if not compact or (not torn and (db.edge or 0) < 1) then
+    -- (soft edges off with a rectangle: nothing to do; with a diamond or an oval: a sharp cut)
+    local plain = (db.edge or 0) < 1 and (db.shape or "rect") == "rect"
+    if not compact or (not torn and plain) then
         if next(maskedTex) then Unmask() end
         HideRim()
         return
@@ -780,6 +853,7 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
         if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
     end
     if math.abs(Canvas():GetScale() - db.scale) > 0.001 then ApplySize() end
+    CoverScreen() -- (in case the game's window layout moved it back)
     ApplyOpacity()
     HideExtras()
     if db.hideMinimap then HideMinimap() end
@@ -925,6 +999,7 @@ ApplyLook = function()
     Place()
     if db.hideMinimap then HideMinimap() else ShowMinimap() end
     HideExtras()
+    if db.hideNames then HideNames() else ShowNames() end
     ApplyEdges()
     ApplyClickThrough()
     UpdateMapButton()
@@ -997,6 +1072,7 @@ local function Restore()
     RevealAll()
     ShowMinimap()
     ShowExtras()
+    ShowNames()
     Unmask()
     ApplyClickThrough() -- (compact is off: everything takes the mouse again)
     RestoreSize()
@@ -1006,7 +1082,13 @@ local function Restore()
     map:SetAlpha(before.alpha or 1)
     if before.mouse then map:EnableMouse(true) end
     UpdateMapButton()
+    local size = before.windowSize
     wipe(before)
+    if size then
+        -- (the window back to its size; the game puts it back in its place)
+        map:ClearAllPoints()
+        map:SetSize(size[1], size[2])
+    end
     if map:IsShown() then
         map:ClearAllPoints()
         if UpdateUIPanelPositions then UpdateUIPanelPositions(map) end
@@ -1087,6 +1169,9 @@ local function HookMap()
     end
     -- Zooming the map: the markers' layer zooms with it right away.
     if map.OnCanvasScaleChanged then
+        if map.ScrollContainer and map.ScrollContainer.CreateZoomLevels then
+            hooksecurefunc(map.ScrollContainer, "CreateZoomLevels", TrimZoomLevels)
+        end
         hooksecurefunc(map, "OnCanvasScaleChanged", function()
             if compact and layer and layer:IsShown() then SyncLayer() end
             if compact then QueueEdges() end -- (map tiles load as you zoom)
@@ -1536,7 +1621,8 @@ local function BuildOptions()
         for _, c in ipairs(SHAPE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
     end, "The shape the map fades into: a rectangle with rounded corners, a diamond or an oval. "
-        .. "With a diamond or an oval, the corners of the map fade away completely. Standard style only.")
+        .. "With a diamond or an oval, the corners of the map fade away completely; with Soft Edges off, "
+        .. "the map is cut sharp in that shape. Standard style only.")
     -- (greyed out with the Torn Parchment style)
     for _, init in ipairs({ edgeInit, shapeInit }) do
         if init and init.SetParentInitializer and styleInit then
@@ -1566,6 +1652,10 @@ local function BuildOptions()
         Settings.CreateCheckbox(category, Register(group.key, group.label),
             "Hidden while the map is open, and back when it closes.")
     end
+    Settings.CreateCheckbox(category, Register("hideNames", "Character Names"),
+        "The names above players', NPCs' and pets' heads, hidden while the map is open and back as they "
+        .. "were when it closes. The game doesn't allow changing them in combat: then they're hidden, or "
+        .. "come back, when combat ends.")
     if layout and CreateSettingsListSectionHeaderInitializer then
         layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Options Button"))
     end
@@ -1761,6 +1851,7 @@ events:SetScript("OnEvent", function(self, event, name)
         BuildOptions()
     elseif event == "PLAYER_LOGIN" then
         HookMap()
+        ShowNames() -- (names left hidden if the game closed with the map open)
         if not GetBindingKey("OVERLAYMAP_SHOW") then
             Say("Choose a key in Options > Keybindings > AddOns > Overlay Map. /omap opens the options.")
         end
