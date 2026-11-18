@@ -237,8 +237,24 @@ local function Shield(f)
     sh:Show()
 end
 
+-- Another addon (UI Visibility, for one, fading something in on mouse hover) may set the opacity
+-- of an invisible part again. It's put back to nothing the moment that happens, in the same
+-- step, so it never shows (checking a few times a second instead made it blink).
+local fadeHooked = {}
+local refading = false
+local function KeepFaded(f)
+    if refading or faded[f] == nil or f:GetAlpha() == 0 then return end
+    refading = true
+    f:SetAlpha(0)
+    refading = false
+end
+
 local function Fade(f)
     if faded[f] == nil then faded[f] = f:GetAlpha() end
+    if not fadeHooked[f] then
+        fadeHooked[f] = true
+        hooksecurefunc(f, "SetAlpha", KeepFaded)
+    end
     if f:GetAlpha() > 0 then f:SetAlpha(0) end
     -- shielded only while it's there to be clicked
     if f:IsVisible() then
@@ -249,8 +265,9 @@ local function Fade(f)
 end
 
 local function Unfade(f)
-    f:SetAlpha(faded[f])
-    faded[f] = nil
+    local alpha = faded[f]
+    faded[f] = nil -- (first, so the hook above lets this one through)
+    f:SetAlpha(alpha)
     if shields[f] then shields[f]:Hide() end
 end
 
