@@ -512,7 +512,7 @@ local function Content() return Canvas().Child end
 -- Keeps the layer over the map area, at the zoom the map has right now.
 -- The same for icon frames that don't zoom with the map (they sit on the map area itself).
 local viewLayer
-local viewMoved = {} -- frame -> { level } while it is on viewLayer
+local viewMoved = {} -- frames moved onto viewLayer
 
 -- Markers go one frame strata above the map, so the map (drawn as one picture) can never end
 -- up over them.
@@ -545,6 +545,32 @@ SyncLayer = function()
     if layer then Sync(layer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale()) end
 end
 
+-- A new parent puts a frame, and the frames inside it, at new frame levels. Inside OpenMap's
+-- icon layer that left its icons under Questie's icons for the same townsfolk (which OpenMap
+-- keeps under its own), so both showed. Every frame keeps the level it had, down the tree.
+local function SaveLevels(f, out, depth)
+    out[f] = f:GetFrameLevel()
+    if depth > 0 then
+        for _, child in ipairs({ f:GetChildren() }) do SaveLevels(child, out, depth - 1) end
+    end
+end
+
+local function LoadLevels(f, levels, depth)
+    local want = levels[f]
+    local fixed = f.HasFixedFrameLevel and f:HasFixedFrameLevel()
+    if want and not fixed and f:GetFrameLevel() ~= want then f:SetFrameLevel(want) end
+    if depth > 0 then
+        for _, child in ipairs({ f:GetChildren() }) do LoadLevels(child, levels, depth - 1) end
+    end
+end
+
+local function Reparent(f, parent, depth)
+    local levels = {}
+    SaveLevels(f, levels, depth)
+    f:SetParent(parent)
+    LoadLevels(f, levels, depth)
+end
+
 local function MovePin(pin)
     if not hookedPins[pin] then
         hookedPins[pin] = true
@@ -552,41 +578,30 @@ local function MovePin(pin)
         -- new markers); while Overlay Map shows it, they go straight back to the layer.
         hooksecurefunc(pin, "SetParent", function(self, parent)
             if reparenting or not compact or not moved[self] or parent == layer then return end
-            local level = self:GetFrameLevel()
             reparenting = true
-            self:SetParent(layer)
+            Reparent(self, layer, 2)
             reparenting = false
-            self:SetFrameLevel(level)
         end)
     end
     if pin:GetParent() ~= layer then
         -- A new parent resets a frame's level, which would put the marker under the map
         -- (out of reach of the mouse, so no tooltip); it keeps the level the map gave it.
-        local level = pin:GetFrameLevel()
         moved[pin] = true
         reparenting = true
-        pin:SetParent(layer)
+        Reparent(pin, layer, 2)
         reparenting = false
-        pin:SetFrameLevel(level)
     end
 end
 
 local function ReturnPins()
     local content = Content()
     reparenting = true
-    for pin in pairs(moved) do
-        local level = pin:GetFrameLevel()
-        pin:SetParent(content)
-        pin:SetFrameLevel(level)
-    end
+    for pin in pairs(moved) do Reparent(pin, content, 2) end
     reparenting = false
     wipe(moved)
     if layer then layer:Hide() end
     local c = Canvas()
-    for f, was in pairs(viewMoved) do
-        f:SetParent(c)
-        f:SetFrameLevel(was.level)
-    end
+    for f in pairs(viewMoved) do Reparent(f, c, 5) end
     wipe(viewMoved)
     if viewLayer then viewLayer:Hide() end
 end
@@ -659,10 +674,8 @@ local function ApplyOpacity()
     viewLayer:Show()
     for f in pairs(iconLayers) do
         if f:GetParent() ~= viewLayer then
-            local level = f:GetFrameLevel()
-            viewMoved[f] = viewMoved[f] or { level = level }
-            f:SetParent(viewLayer)
-            f:SetFrameLevel(level)
+            viewMoved[f] = true
+            Reparent(f, viewLayer, 5)
         end
     end
     for template, pool in pairs(map.pinPools or {}) do
@@ -836,7 +849,7 @@ local function Follow(force)
 end
 
 local edgeAcc = 0
-local ApplyClickThrough -- (further down)
+local ApplyClickThrough, ApplyOnlyMe, ApplyMarkerSize -- (further down)
 watcher:SetScript("OnUpdate", function(self, elapsed)
     if not compact then self:Hide(); return end
     if db.follow and not settling then
@@ -860,7 +873,8 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     HideExtras()
     if db.hideMinimap then HideMinimap() end
     if db.clickThrough then ApplyClickThrough() end -- (in case something gave the mouse back)
-    if db.onlyMe then ApplyOnlyMe() end -- (new markers)
+    ApplyOnlyMe() -- (new markers)
+    ApplyMarkerSize() -- (new markers)
     edgeAcc = edgeAcc + 1
     if edgeAcc >= 5 then -- (once a second, for anything the events missed)
         edgeAcc = 0
@@ -964,7 +978,11 @@ ApplyClickThrough = function(force)
             if SPLIT then
                 -- hover yes, clicks no
                 if f:IsMouseClickEnabled() then pcall(f.SetMouseClickEnabled, f, false) end
-                if not f:IsMouseMotionEnabled() then pcall(f.SetMouseMotionEnabled, f, true) end
+                -- (an addon's icon layer that didn't notice the mouse is left so: covering the whole
+                -- map, it would take the hover from the markers under it, like Questie's)
+                if not f:IsMouseMotionEnabled() and not (iconLayers[f] and not passSaved[f][2]) then
+                    pcall(f.SetMouseMotionEnabled, f, true)
+                end
             elseif f:IsMouseEnabled() then
                 pcall(f.EnableMouse, f, false)
             end
@@ -1038,20 +1056,50 @@ local function IsArrow(f)
     return false
 end
 
-local function ShowMarkers()
+-- (keep: the ones to leave hidden, if any)
+local function ShowMarkers(keep)
     if not next(onlyHidden) then return end
     onlyKeeping = true
     for f, was in pairs(onlyHidden) do
+        if keep and keep(f) then
+            -- (stays hidden)
+        else
         onlyHidden[f] = nil
         f:SetAlpha(was.alpha or 1)
         if was.motion ~= nil and f.SetMouseMotionEnabled then pcall(f.SetMouseMotionEnabled, f, was.motion) end
+        end
     end
     onlyKeeping = false
 end
 
-local function ApplyOnlyMe()
-    if not compact or not db.onlyMe then
+-- OpenMap draws its own icons for townsfolk (vendors, trainers, mailboxes) from Questie's
+-- database, and Questie draws its own for the same NPCs. On its map OpenMap keeps Questie's
+-- under its own, so only one shows; over the world, with the markers on their own layers, both
+-- showed. While Overlay Map shows OpenMap's map, Questie's townsfolk icons are hidden (Questie's
+-- quest icons stay).
+local function IsTownsfolk(f) return f.isManualIcon == true end
+
+local function HideTownsfolkTwins()
+    local api = OpenMapLoaded() and _G.OpenMapAPI
+    if not (api and api.IsStitched and api.IsStitched()) then return false end
+    for template, pool in pairs(Map().pinPools or {}) do
+        if type(template) == "string" and template:find("HereBeDragons", 1, true) and pool.EnumerateActive then
+            for pin in pool:EnumerateActive() do
+                local icon = pin.icon
+                if icon and IsTownsfolk(icon) then HideMarker(icon) end
+            end
+        end
+    end
+    return true
+end
+
+ApplyOnlyMe = function()
+    if not compact then
         ShowMarkers()
+        return
+    end
+    if not db.onlyMe then
+        if HideTownsfolkTwins() then ShowMarkers(IsTownsfolk) else ShowMarkers() end
         return
     end
     for template, pool in pairs(Map().pinPools or {}) do
@@ -1066,13 +1114,113 @@ local function ApplyOnlyMe()
     end
 end
 
+-- Marker size. Each of the game's markers works out its own size (and then its place, which
+-- depends on it) whenever the map zooms; Overlay Map's size is added on top each time it does,
+-- so markers stay exactly where they belong. Markers placed by HereBeDragons (Questie's) are
+-- placed again by OpenMap its own way, so for those only the icon inside them is resized (it sits
+-- at the marker's centre). OpenMap's own icons (vendors, mailboxes...) sit at their spot's
+-- centre too, so they're simply resized, on top of OpenMap's own Icon size. (Resizing only some
+-- of them showed the others underneath: OpenMap and Questie often mark the same NPC.) All of it
+-- only while Overlay Map shows the map.
+local sizeHooked = setmetatable({}, { __mode = "k" })
+local sizedPins = setmetatable({}, { __mode = "k" })  -- pins resized (to put back on close)
+local iconBase = setmetatable({}, { __mode = "k" })   -- HereBeDragons icon -> its own scale
+local omBase = setmetatable({}, { __mode = "k" })     -- OpenMap icon -> { its own scale, the one set }
+
+-- Questie's icons are placed by OpenMap at a distance from a fixed point, which a new scale
+-- would stretch (the icon drifted away from its spot, beside OpenMap's icon for the same NPC):
+-- their size is changed instead, which keeps their centre where it is.
+local function SizeQuestieIcon(icon, k)
+    local rec = iconBase[icon]
+    local w, h = icon:GetSize()
+    if not w or w == 0 then return end
+    if not rec then
+        if k == 1 then return end
+        rec = { w = w, h = h }
+        iconBase[icon] = rec
+    elseif rec.sw and (math.abs(w - rec.sw) > 0.01 or math.abs(h - rec.sh) > 0.01) then
+        rec.w, rec.h = w, h -- (Questie sized it again: that's its own size now)
+    end
+    local ww, wh = rec.w * k, rec.h * k
+    if math.abs(w - ww) > 0.01 or math.abs(h - wh) > 0.01 then icon:SetSize(ww, wh) end
+    rec.sw, rec.sh = ww, wh
+    if k == 1 then iconBase[icon] = nil end
+end
+
+local function SizeOpenMapIcon(pin, k)
+    local rec = omBase[pin]
+    local cur = pin:GetScale()
+    if not rec then
+        if k == 1 then return end
+        rec = { base = cur }
+        omBase[pin] = rec
+    elseif rec.set and math.abs(cur - rec.set) > 0.0001 then
+        rec.base = cur -- (OpenMap set its size again: that's its own size now)
+    end
+    local want = rec.base * k
+    if math.abs(cur - want) > 0.0001 then pin:SetScale(want) end
+    rec.set = want
+    if k == 1 then omBase[pin] = nil end
+end
+
+local function SizeAfterScale(pin)
+    if not compact or (db.markerSize or 1) == 1 then return end
+    -- (a marker that doesn't work out a size of its own was left as it was: nothing to add to)
+    if not (pin.startScale and pin.endScale) and pin.IsIgnoringGlobalPinScale and pin:IsIgnoringGlobalPinScale() then
+        return
+    end
+    pin:SetScale(pin:GetScale() * db.markerSize)
+    if pin.ApplyCurrentPosition then pin:ApplyCurrentPosition() end
+end
+
+ApplyMarkerSize = function()
+    local k = compact and db.markerSize or 1
+    local map = Map()
+    for template, pool in pairs(map.pinPools or {}) do
+        if pool.EnumerateActive and not MAP_ART[template] then
+            local hbd = type(template) == "string" and template:find("HereBeDragons", 1, true)
+            for pin in pool:EnumerateActive() do
+                if hbd then
+                    local icon = pin.icon
+                    if icon and icon.SetSize then SizeQuestieIcon(icon, k) end
+                elseif pin.ApplyCurrentScale then
+                    if not sizeHooked[pin] then
+                        sizeHooked[pin] = true
+                        hooksecurefunc(pin, "ApplyCurrentScale", SizeAfterScale)
+                    end
+                    -- (worked out again: by the game, then this size on top)
+                    if math.abs((sizedPins[pin] or 1) - k) > 0.0001 then
+                        sizedPins[pin] = k ~= 1 and k or nil
+                        pin:ApplyCurrentScale()
+                    end
+                end
+            end
+        end
+    end
+    -- OpenMap's icons: its layer, its sets, their cells, the icons (each with its picture and the
+    -- spot it's anchored to)
+    local function Walk(f, depth)
+        for _, child in ipairs({ f:GetChildren() }) do
+            if child.Icon and child.anchor then
+                SizeOpenMapIcon(child, k)
+            elseif depth > 0 then
+                Walk(child, depth - 1)
+            end
+        end
+    end
+    for f in pairs(iconLayers) do Walk(f, 3) end
+    if k == 1 then
+        for pin in pairs(omBase) do SizeOpenMapIcon(pin, 1) end
+        for icon in pairs(iconBase) do SizeQuestieIcon(icon, 1) end
+    end
+end
+
 local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
     if not compact then return end
     local map = Map()
-    -- Markers' size: the game's own setting for all of the map's markers (Questie's too).
-    if map.SetGlobalPinScale then pcall(map.SetGlobalPinScale, map, db.markerSize or 1) end
+    ApplyMarkerSize()
     ApplySize()
     ApplyOpacity()
     if PlayerMovementFrameFader and PlayerMovementFrameFader.RemoveFrame then
@@ -1161,7 +1309,7 @@ local function Restore()
     ShowMarkers()
     RestoreSize()
     RestoreOpacity()
-    if before.pinScale and map.SetGlobalPinScale then pcall(map.SetGlobalPinScale, map, before.pinScale) end
+    ApplyMarkerSize() -- (compact is off: markers back to their size)
     wipe(iconLayers)
     settling = false
     map:SetAlpha(before.alpha or 1)
@@ -1197,7 +1345,6 @@ local function Open()
 
     compact = true
     before.alpha = map:GetAlpha()
-    before.pinScale = map.GetGlobalPinScale and map:GetGlobalPinScale() or nil
     -- The map frame stays its full size around the smaller map area; it must not take clicks.
     before.mouse = map:IsMouseEnabled()
     if before.mouse then map:EnableMouse(false) end
@@ -1683,8 +1830,8 @@ local function BuildOptions()
     Slider("pinOpacity", "Objectives Opacity",
         "How see-through the markers on the map are: quests, vendors, flight points, your arrow and other addons' markers.",
         0.1, 1, 0.05)
-    Slider("markerSize", "Marker Size", "Size of the markers on the map (Questie's too). OpenMap's own icons "
-        .. "(vendors, mailboxes, flight points) use OpenMap's Icon size option instead.", 0.5, 2.5, 0.05)
+    Slider("markerSize", "Marker Size", "Size of the markers on the map, Questie's and OpenMap's icons too "
+        .. "(on top of OpenMap's own Icon size).", 0.5, 2.5, 0.05)
     Settings.CreateCheckbox(category, Register("noFade", "Keep Opacity While Moving"),
         "With this off, the map fades to half while you move, like the game's own map.")
     Settings.CreateCheckbox(category, Register("hideMinimap", "Hide Minimap"),
@@ -1843,6 +1990,13 @@ function OverlayMap_Debug()
     local top = foci and foci[1]
     Say("Under the mouse: " .. tostring(top and (top:GetName() or (top.pinTemplate and ("marker " .. top.pinTemplate))
         or tostring(top:GetObjectType()) .. " of " .. tostring(top:GetParent() and top:GetParent():GetName()))))
+    local twins = 0
+    for f in pairs(onlyHidden) do if IsTownsfolk(f) then twins = twins + 1 end end
+    Say("Questie's townsfolk icons hidden (OpenMap draws its own): " .. twins)
+    if top then
+        Say("  townsfolk icon: " .. tostring(top.isManualIcon) .. ", level " .. top:GetFrameLevel() .. ", strata " .. top:GetFrameStrata()
+            .. ", hidden by Overlay Map: " .. tostring(onlyHidden[top] ~= nil))
+    end
     local pools, pins, kinds = 0, 0, {}
     if map and map.pinPools then
         for template, pool in pairs(map.pinPools) do
@@ -1880,10 +2034,31 @@ function OverlayMap_Debug()
             Say(group.label .. ": " .. (#parts > 0 and table.concat(parts, "; ") or "nothing shown"))
         end
     end
+    -- What's under the mouse, and what holds it, up to the screen: who made it, its size and scale.
+    local function Describe(fr)
+        local what = fr:GetName() or fr:GetObjectType()
+        if fr.pinTemplate then what = what .. " [marker " .. tostring(fr.pinTemplate) .. "]" end
+        if fr.Icon and fr.anchor then what = what .. " [OpenMap icon]" end
+        if fr.icon then what = what .. " [holds an icon]" end
+        if fr == layer then what = what .. " [Overlay Map's marker layer]" end
+        if fr == viewLayer then what = what .. " [Overlay Map's icon layer]" end
+        if iconLayers[fr] then what = what .. " [an addon's icon layer]" end
+        local w, h = fr:GetSize()
+        return string.format("%s  %.0fx%.0f, scale %.2f (on screen %.2f), alpha %.2f%s", what, w or 0, h or 0,
+            fr:GetScale(), fr:GetEffectiveScale(), fr:GetEffectiveAlpha(), fr:IsShown() and "" or ", hidden")
+    end
     local foci2 = GetMouseFoci and GetMouseFoci() or { GetMouseFocus and GetMouseFocus() }
     local f1 = foci2 and foci2[1]
-    Say("Mouse focus: " .. tostring(f1 and (f1:GetName() or (f1:GetObjectType() .. " in "
-        .. tostring(f1:GetParent() and f1:GetParent():GetName())))))
+    if f1 then
+        Say("Under the mouse, and what holds it:")
+        local fr, n = f1, 0
+        while fr and n < 7 do
+            DEFAULT_CHAT_FRAME:AddMessage("   " .. string.rep("  ", n) .. Describe(fr))
+            fr, n = fr:GetParent(), n + 1
+        end
+    else
+        Say("Under the mouse: nothing")
+    end
     Say("Map-related addons loaded: " .. (#list > 0 and table.concat(list, ", ") or "none"))
 end
 
