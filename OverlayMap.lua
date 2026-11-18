@@ -15,6 +15,8 @@ local DEFAULTS = {
     pinOpacity = 1,  -- opacity of the markers on it (quests, vendors, your arrow...)
     markerSize = 1,  -- size of the markers (the game's own setting for the map's markers)
     onlyMe = false,  -- hide every marker except your own arrow
+    arrowCustom = false, -- your own arrow at its own size and opacity (below)
+    arrowSize = 1, arrowOpacity = 1,
     noFade = true,   -- keep that opacity while moving (the game fades the map while you move)
     hideMinimap = true, -- hide the minimap while the map is open
     follow = false,  -- keep the map centred on you while it's open, like the minimap
@@ -39,7 +41,7 @@ local compact = false   -- the map is open in Overlay Map's look
 local hidden = {}       -- frame or texture -> { alpha, mouse } it had before Overlay Map hid it
 local stopped = {}      -- frames Overlay Map hid completely (they stop working until shown again)
 -- Frames as big as the map area that other addons put on it for their icons (OpenMap draws its
--- vendors, mailboxes, flight points and its own arrow on one): kept, and given the objectives'
+-- vendors, mailboxes, flight points and its own arrow on one): kept, and given the markers'
 -- opacity like the map's markers. frame -> true
 local iconLayers = {}
 local before = {}       -- the map's own scale and the map area's opacity before Overlay Map changed them
@@ -159,12 +161,28 @@ local function CoverScreen()
     end
 end
 
+-- Overlay mode fills the whole screen: its size, width and place come from the screen (worked
+-- out again if the screen or the interface scale changes), not from the options, which are kept
+-- for when it's turned off.
+local function FullScreen()
+    if not db.overlay or not before.cw or before.cw == 0 or before.ch == 0 then return end
+    local parent = Canvas():GetParent()
+    local pe = parent and parent:GetEffectiveScale() or 1
+    local ue = UIParent:GetEffectiveScale()
+    local s = UIParent:GetHeight() * ue / (before.ch * pe)
+    return s, UIParent:GetWidth() * ue / (before.cw * pe * s)
+end
+local function WantScale() local s = FullScreen() return s or db.scale end
+local function WantWidth() local _, w = FullScreen() return w or db.width end
+
 local function AnchorCanvas()
     local c = Canvas()
     CoverScreen()
     c:ClearAllPoints()
     local k = UIParent:GetEffectiveScale() / c:GetEffectiveScale()
-    c:SetPoint("CENTER", UIParent, "CENTER", db.x * k, db.y * k)
+    local x, y = db.x, db.y
+    if db.overlay then x, y = 0, 0 end
+    c:SetPoint("CENTER", UIParent, "CENTER", x * k, y * k)
 end
 
 local function Place()
@@ -411,7 +429,7 @@ local SyncLayer, QueueRefit, Refit, ApplyLook -- (further down)
 -- fit are cut off), centred on you.
 local function Fill()
     local map, c = Map(), Canvas()
-    if not compact or math.abs(db.width - 1) < 0.001 or not c.InstantPanAndZoom then return end
+    if not compact or math.abs(WantWidth() - 1) < 0.001 or not c.InstantPanAndZoom then return end
     local mapID = map.GetMapID and map:GetMapID()
     local layers = mapID and C_Map.GetMapArtLayers(mapID)
     local art = layers and layers[1]
@@ -438,8 +456,8 @@ local function ApplySize()
         local k = map:GetEffectiveScale() / UIParent:GetEffectiveScale()
         db.areaW, db.areaH = before.cw * k, before.ch * k
     end
-    c:SetScale(db.scale)
-    local w = before.cw * db.width
+    c:SetScale(WantScale())
+    local w = before.cw * WantWidth()
     c:SetSize(w, before.ch)
     AnchorCanvas()
     if appliedW ~= w then
@@ -609,6 +627,9 @@ end
 -- For a moment after opening, the game and other addons are still laying the map out; it stays
 -- invisible until that is done, so the normal map doesn't flash on screen.
 local settling = false
+-- While the map fades out to be laid out again (ApplyShape), nothing else lays it out meanwhile:
+-- a second layout in between left it hidden. shapeGen: the latest one (an older one's steps stop).
+local reshaping, shapeGen = false, 0
 
 -- A new width: the map works out its zoom again for the new shape. That's done once the width
 -- stops changing (not on every step of a slider), with the map hidden for that moment, since
@@ -623,6 +644,7 @@ end
 
 -- While the map is still hidden (just opened), at once; otherwise once the width settles.
 Refit = function()
+    if reshaping and not settling then return end -- (ApplyShape lays it out once it's hidden)
     if settling then RefitNow() else QueueRefit() end
 end
 
@@ -630,21 +652,26 @@ QueueRefit = function()
     if refitTimer then refitTimer:Cancel() end
     refitTimer = C_Timer.NewTimer(0.25, function()
         refitTimer = nil
-        if not compact then return end
+        if not compact or reshaping then return end
+        -- (already hidden for a layout: re-fitted now, and that one shows it again)
+        if settling then RefitNow() return end
         local map = Map()
-        local wasSettling = settling
         settling = true
         map:SetAlpha(0)
         if layer then layer:SetAlpha(0) end
         if viewLayer then viewLayer:SetAlpha(0) end
         RefitNow()
         C_Timer.After(0.15, function()
-            if not compact then return end
-            settling = wasSettling
+            if not compact or reshaping then return end
+            settling = false
             ApplyLook()
         end)
     end)
 end
+
+-- A quick fade of the whole map (and its markers) while it's laid out again, instead of it going
+-- off and on at once: 1 shown, 0 hidden (FadeTo, further down).
+local transition = 1
 
 local function ApplyOpacity()
     local map = Map()
@@ -652,6 +679,7 @@ local function ApplyOpacity()
     -- "Keep Opacity While Moving" is off, so it works with these opacities.
     local fade = (not db.noFade and IsPlayerMoving and IsPlayerMoving()) and 0.5 or 1
     if settling then fade = 0 end
+    fade = fade * transition
     local mapAlpha = db.opacity * fade
     if math.abs(map:GetAlpha() - mapAlpha) > 0.001 then map:SetAlpha(mapAlpha) end
 
@@ -688,6 +716,34 @@ end
 local function RestoreOpacity()
     ReturnPins()
 end
+
+local fader = CreateFrame("Frame")
+fader:Hide()
+fader:SetScript("OnUpdate", function(self)
+    local k = math.min(1, (GetTime() - self.t0) / self.time)
+    transition = self.from + (self.to - self.from) * k
+    if compact then ApplyOpacity() end
+    if k >= 1 then
+        self:Hide()
+        local done = self.done
+        self.done = nil
+        if done then done() end
+    end
+end)
+
+local function FadeTo(target, time, done)
+    fader.from, fader.to, fader.t0, fader.time, fader.done = transition, target, GetTime(), time, done
+    fader:Show()
+end
+
+local function StopFade()
+    fader:Hide()
+    fader.done = nil
+    transition = 1
+    reshaping = false
+    shapeGen = shapeGen + 1
+end
+
 
 -- Soft edges. The map and its markers fade out towards the edges of the map area, like the
 -- overlay maps of other games. Every picture in the map area gets a mask: a picture that is
@@ -821,10 +877,32 @@ local function PlayerOnMap(mapID)
     return x, y
 end
 
+-- Whether the mouse is on a marker (the game's, Questie's or OpenMap's), not just on the map.
+local function OverMarker()
+    local foci = GetMouseFoci and GetMouseFoci() or { GetMouseFocus and GetMouseFocus() }
+    local f = foci and foci[1]
+    local c = Canvas()
+    if not f or f == c or f == c.Child or iconLayers[f] or f == layer or f == viewLayer then return false end
+    local up, n = f:GetParent(), 0
+    while up and n < 8 do
+        if up == c or up == layer or up == viewLayer then return true end
+        up, n = up:GetParent(), n + 1
+    end
+    return false
+end
+
 local function Follow(force)
     -- With the mouse over the map, it holds still so you can look at the markers (it catches up
-    -- with you when the mouse leaves).
-    if Canvas():IsMouseOver() then
+    -- with you when the mouse leaves). In Overlay Mode the map fills the screen, so the mouse is
+    -- always over it: there it holds still only with the mouse on a marker, or with Shift held
+    -- (using the map).
+    local hold
+    if db.overlay then
+        hold = IsShiftKeyDown() or OverMarker()
+    else
+        hold = Canvas():IsMouseOver()
+    end
+    if hold then
         lastX, lastY = nil, nil
         return
     end
@@ -849,7 +927,7 @@ local function Follow(force)
 end
 
 local edgeAcc = 0
-local ApplyClickThrough, ApplyOnlyMe, ApplyMarkerSize -- (further down)
+local ApplyClickThrough, ApplyOnlyMe, ApplyMarkerSize, ApplyArrow -- (further down)
 watcher:SetScript("OnUpdate", function(self, elapsed)
     if not compact then self:Hide(); return end
     if db.follow and not settling then
@@ -867,7 +945,9 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     for obj in pairs(hidden) do
         if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
     end
-    if math.abs(Canvas():GetScale() - db.scale) > 0.001 then ApplySize() end
+    if not reshaping and math.abs(Canvas():GetScale() - WantScale()) > 0.001 then ApplySize() end -- (also a new screen size)
+    -- (a fade left half-way, which nothing is finishing: the map shown again)
+    if not reshaping and not settling and transition < 1 and not fader:IsShown() then FadeTo(1, 0.2) end
     CoverScreen() -- (in case the game's window layout moved it back)
     ApplyOpacity()
     HideExtras()
@@ -875,6 +955,7 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     if db.clickThrough then ApplyClickThrough() end -- (in case something gave the mouse back)
     ApplyOnlyMe() -- (new markers)
     ApplyMarkerSize() -- (new markers)
+    ApplyArrow()
     edgeAcc = edgeAcc + 1
     if edgeAcc >= 5 then -- (once a second, for anything the events missed)
         edgeAcc = 0
@@ -1215,6 +1296,78 @@ ApplyMarkerSize = function()
     end
 end
 
+-- My arrow: its own size and opacity, when chosen (My Arrow's Own Size). With OpenMap's map it's
+-- OpenMap's own arrow (a picture on its icon layer); otherwise the game's, drawn by the group
+-- members' marker, whose size for the player is set on it (its opacity is the whole marker's, so
+-- the party's dots take it too). Put back as it was on close.
+local arrowBase = setmetatable({}, { __mode = "k" })    -- arrow picture or marker -> its own size
+local arrowHooked = setmetatable({}, { __mode = "k" })
+local arrowApplied = setmetatable({}, { __mode = "k" })   -- marker -> the size factor last set on it
+local arrowSetting = false
+
+local function ArrowWant()
+    if compact and db.arrowCustom then return db.arrowSize or 1, db.arrowOpacity or 1 end
+    return 1, 1
+end
+
+local function OpenMapArrow()
+    for f in pairs(iconLayers) do
+        for _, child in ipairs({ f:GetChildren() }) do
+            for _, r in ipairs({ child:GetRegions() }) do
+                if r:GetObjectType() == "Texture" then
+                    local path = r.GetTextureFilePath and r:GetTextureFilePath() or r:GetTexture()
+                    if type(path) == "string" and path:lower():find("minimaparrow") then return r end
+                end
+            end
+        end
+    end
+end
+
+ApplyArrow = function()
+    local k, a = ArrowWant()
+    local tex = OpenMapArrow()
+    if tex then
+        if not arrowBase[tex] then
+            if k == 1 and a == 1 then tex = nil else arrowBase[tex] = tex:GetWidth() end
+        end
+        if tex then
+            local want = arrowBase[tex] * k
+            if math.abs(tex:GetWidth() - want) > 0.01 then tex:SetSize(want, want) end
+            if math.abs(tex:GetAlpha() - a) > 0.001 then tex:SetAlpha(a) end
+            if k == 1 and a == 1 then arrowBase[tex] = nil end
+        end
+    end
+    local pool = Map().pinPools and Map().pinPools.GroupMembersPinTemplate
+    if not (pool and pool.EnumerateActive) then return end
+    for pin in pool:EnumerateActive() do
+        if pin.SetPinSize then
+            if not arrowHooked[pin] then
+                arrowHooked[pin] = true
+                -- (the game sets the player's size again now and then: noted as its own, ours on top)
+                hooksecurefunc(pin, "SetPinSize", function(self, unit, size)
+                    if arrowSetting or unit ~= "player" or type(size) ~= "number" then return end
+                    arrowBase[self] = size
+                    local kk = ArrowWant()
+                    if kk ~= 1 then
+                        arrowSetting = true
+                        pcall(self.SetPinSize, self, "player", size * kk)
+                        arrowSetting = false
+                    end
+                end)
+                if pin.UpdateAppearanceData then pcall(pin.UpdateAppearanceData, pin) end
+            end
+            local base = arrowBase[pin]
+            if base and arrowApplied[pin] ~= k then
+                arrowApplied[pin] = k
+                arrowSetting = true
+                pcall(pin.SetPinSize, pin, "player", base * k)
+                arrowSetting = false
+            end
+        end
+        if math.abs(pin:GetAlpha() - a) > 0.001 then pin:SetAlpha(a) end
+    end
+end
+
 local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
@@ -1233,6 +1386,7 @@ ApplyLook = function()
     ApplyEdges()
     ApplyClickThrough()
     ApplyOnlyMe()
+    ApplyArrow()
     UpdateMapButton()
 end
 
@@ -1297,6 +1451,7 @@ end
 
 local function Restore()
     if not compact then return end
+    StopFade()
     SaveZoom()
     compact = false
     local map = Map()
@@ -1310,6 +1465,7 @@ local function Restore()
     RestoreSize()
     RestoreOpacity()
     ApplyMarkerSize() -- (compact is off: markers back to their size)
+    ApplyArrow()      -- (... and your arrow)
     wipe(iconLayers)
     settling = false
     map:SetAlpha(before.alpha or 1)
@@ -1444,6 +1600,10 @@ end
 local mover
 
 local function ShowMover()
+    if db.overlay then
+        Say("Overlay Mode fills the whole screen: turn it off to move the map.")
+        return
+    end
     if not mover then
         mover = CreateFrame("Frame", "OverlayMapMover", UIParent, "BackdropTemplate")
         mover:SetFrameStrata("FULLSCREEN")
@@ -1510,60 +1670,91 @@ local pending = {}
 
 -- Applies a new size or width with the map hidden for a moment, so the new layout isn't seen
 -- being worked out.
+-- The map fades out, is laid out again while hidden (OpenMap and the game take a few frames to
+-- settle), and fades back in.
 local function ApplyShape()
     if not compact then return end
-    settling = true
-    ApplyOpacity()   -- (hidden while settling)
-    ApplyLook()      -- (the map re-fits at once while it's hidden)
-    C_Timer.After(0.15, function()
-        if not compact then return end
-        settling = false
-        ApplyLook()
+    shapeGen = shapeGen + 1
+    local gen = shapeGen
+    reshaping = true
+    if refitTimer then refitTimer:Cancel() refitTimer = nil end
+    FadeTo(0, 0.12, function()
+        if gen ~= shapeGen then return end
+        if not compact then StopFade() return end
+        settling = true
+        ApplyLook()      -- (the map re-fits at once while it's hidden)
+        C_Timer.After(0.15, function()
+            if gen ~= shapeGen then return end
+            if not compact then StopFade() return end
+            settling = false
+            reshaping = false
+            ApplyLook()
+            FadeTo(1, 0.2)
+        end)
     end)
 end
 
--- Overlay mode: one switch that makes the map big, in the middle of the screen, see-through
--- (markers stay solid) and with large soft edges. Turning it off puts back what you had.
-local OVERLAY_KEYS = { "scale", "width", "opacity", "pinOpacity", "edge", "x", "y", "noFade", "clickThrough" }
-
-local function OverlaySize()
-    local w, h = (db.areaW or 702), (db.areaH or 467)
-    local s = math.min(UIParent:GetWidth() * 0.9 / w, UIParent:GetHeight() * 0.85 / h)
-    return math.max(0.3, math.min(2.5, math.floor(s * 20) / 20))
-end
+-- Overlay mode: one switch that makes the map fill the whole screen (FullScreen: size, width and
+-- place come from the screen while it's on). It keeps its own look, apart from the normal map's:
+-- the settings below are swapped when it's turned on or off, so a change made in one mode stays in
+-- that mode. The other mode's values wait in the saved settings (beforeOverlay: the normal map's,
+-- while Overlay Mode is on; overlaySet: Overlay Mode's, while it's off).
+local OVERLAY_KEYS = { "opacity", "pinOpacity", "markerSize", "arrowCustom", "arrowSize", "arrowOpacity", "style",
+    "edge", "shape", "clickThrough", "noFade" }
+-- Overlay Mode the first time it's turned on: see-through, solid markers, large soft edges,
+-- click-through (the rest as the normal map has them)
+local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, noFade = true }
 
 local RefreshPanel -- (further down)
+
+-- The options window shows the swapped values (if it's open, its controls are told to read them again).
+local function NotifyOptions()
+    if not (Settings and Settings.NotifyUpdate) then return end
+    for _, k in ipairs(OVERLAY_KEYS) do pcall(Settings.NotifyUpdate, ADDON_NAME .. "_" .. k) end
+end
 
 local function SyncOverlay()
     if db.overlay and not db.overlayActive then
         db.beforeOverlay = {}
         for _, k in ipairs(OVERLAY_KEYS) do db.beforeOverlay[k] = db[k] end
-        db.scale, db.width, db.x, db.y = OverlaySize(), 1, 0, 0
-        db.opacity, db.pinOpacity, db.edge, db.noFade = 0.3, 1, 3, true
-        db.clickThrough = true
+        local saved = db.overlaySet or {}
+        for _, k in ipairs(OVERLAY_KEYS) do
+            if saved[k] ~= nil then
+                db[k] = saved[k]
+            elseif OVERLAY_START[k] ~= nil then
+                db[k] = OVERLAY_START[k]
+            end
+        end
         db.overlayActive = true
     elseif not db.overlay and db.overlayActive then
+        db.overlaySet = {}
+        for _, k in ipairs(OVERLAY_KEYS) do db.overlaySet[k] = db[k] end
+        -- (from an older version, the normal map's size, width and place may be here too)
         for k, v in pairs(db.beforeOverlay or {}) do db[k] = v end
         db.beforeOverlay = nil
         db.overlayActive = false
     else
         return
     end
+    NotifyOptions()
     if RefreshPanel then RefreshPanel() end
     if compact then ApplyShape() end
 end
 
+-- The small panel. Its rows are grouped in sections whose titles fold and unfold them (remembered),
+-- and rows that don't apply right now aren't shown at all: Size and Width in Overlay Mode, your
+-- arrow's size and opacity until you choose to set them. The panel grows and shrinks to fit.
 -- A plain slider: label on the left, value on the right, the bar under them.
-local function PanelSlider(parent, y, key, label, minValue, maxValue, step, deferred)
+local function PanelSlider(parent, key, label, minValue, maxValue, step, deferred)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    text:SetPoint("TOPLEFT", 12, y)
+    text:SetPoint("TOPLEFT", 12, 0)
     text:SetText(label)
     local value = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    value:SetPoint("TOPRIGHT", -12, y)
+    value:SetPoint("TOPRIGHT", -12, 0)
     local s = CreateFrame("Slider", nil, parent)
     s:SetOrientation("HORIZONTAL")
-    s:SetPoint("TOPLEFT", 12, y - 16)
-    s:SetPoint("TOPRIGHT", -12, y - 16)
+    s:SetPoint("TOPLEFT", 12, -16)
+    s:SetPoint("TOPRIGHT", -12, -16)
     s:SetHeight(14)
     s:SetMinMaxValues(minValue, maxValue)
     s:SetValueStep(step)
@@ -1584,27 +1775,26 @@ local function PanelSlider(parent, y, key, label, minValue, maxValue, step, defe
         if self.silent then return end
         if deferred then
             pending[key] = math.abs((db[key] or 0) - v) > 0.0001 and v or nil
-            if parent.UpdateApply then parent:UpdateApply() end
+            if panel and panel.UpdateApply then panel:UpdateApply() end
             return
         end
         if math.abs((db[key] or 0) - v) < 0.0001 then return end
         db[key] = v
         ApplyLook()
     end)
-    function s:Refresh()
+    function parent:Refresh()
         pending[key] = nil
-        self.silent = true
-        self:SetValue(db[key])
-        self.silent = false
+        s.silent = true
+        s:SetValue(db[key])
+        s.silent = false
         value:SetText(string.format("%d%%", db[key] * 100 + 0.5))
     end
-    return s
 end
 
-local function PanelCheck(parent, y, key, label)
+local function PanelCheck(parent, key, label)
     local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
     cb:SetSize(22, 22)
-    cb:SetPoint("TOPLEFT", 8, y)
+    cb:SetPoint("TOPLEFT", 8, 0)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     text:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     text:SetText(label)
@@ -1612,41 +1802,60 @@ local function PanelCheck(parent, y, key, label)
         db[key] = self:GetChecked() and true or false
         SyncOverlay()
         ApplyLook()
+        if RefreshPanel then RefreshPanel() end -- (rows may show or go with it)
     end)
-    function cb:Refresh() self:SetChecked(db[key] and true or false) end
-    return cb
+    function parent:Refresh() cb:SetChecked(db[key] and true or false) end
 end
 
 -- A button that steps through a few choices: "Label: Choice"
-local function PanelCycle(parent, y, key, label, choices, enabledIf)
+local function PanelCycle(parent, key, label, choices, enabledIf)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     b:SetHeight(20)
-    b:SetPoint("TOPLEFT", 10, y)
-    b:SetPoint("TOPRIGHT", -10, y)
-    function b:Refresh()
+    b:SetPoint("TOPLEFT", 10, 0)
+    b:SetPoint("TOPRIGHT", -10, 0)
+    function parent:Refresh()
         for _, c in ipairs(choices) do
-            if c[1] == db[key] then self:SetText(label .. ": " .. c[2]) end
+            if c[1] == db[key] then b:SetText(label .. ": " .. c[2]) end
         end
-        if enabledIf then self:SetEnabled(enabledIf()) end
+        if enabledIf then b:SetEnabled(enabledIf()) end
     end
-    b:SetScript("OnClick", function(self)
+    b:SetScript("OnClick", function()
         for i, c in ipairs(choices) do
             if c[1] == db[key] then
                 db[key] = choices[i % #choices + 1][1]
                 break
             end
         end
-        self:Refresh()
         SyncOverlay()
         ApplyLook()
         if RefreshPanel then RefreshPanel() end -- (other rows may depend on this one)
     end)
-    return b
+end
+
+local function NotOverlay() return not db.overlay end
+local function ArrowOwn() return db.arrowCustom and true or false end
+
+-- Next to the options button, on the outside of the map; inside it (under the button) in Overlay
+-- Mode, which fills the screen, or when there's no room outside.
+local function PlacePanel()
+    if not panel or not mapButton then return end
+    local inside = db.overlay
+    if not inside then
+        local right = (mapButton:GetRight() or 0) * mapButton:GetEffectiveScale()
+        local screen = (UIParent:GetRight() or 0) * UIParent:GetEffectiveScale()
+        inside = right + (panel:GetWidth() + 6) * panel:GetEffectiveScale() > screen
+    end
+    panel:ClearAllPoints()
+    if inside then
+        panel:SetPoint("TOPRIGHT", mapButton, "BOTTOMRIGHT", 0, -6)
+    else
+        panel:SetPoint("TOPLEFT", mapButton, "TOPRIGHT", 6, 0)
+    end
 end
 
 local function BuildPanel()
     panel = CreateFrame("Frame", "OverlayMapPanel", UIParent, "BackdropTemplate")
-    panel:SetSize(230, 530)
+    panel:SetWidth(230)
     panel:SetFrameStrata("FULLSCREEN_DIALOG")
     panel:SetClampedToScreen(true)
     panel:EnableMouse(true)
@@ -1662,52 +1871,120 @@ local function BuildPanel()
     close:SetPoint("TOPRIGHT", 0, 0)
     close:SetScript("OnClick", function() panel:Hide() end)
 
-    panel.rows = {
-        PanelCycle(panel, -32, "mode", "Key", { { "hold", "Hold to show" }, { "press", "Press to show or hide" } }),
-        PanelSlider(panel, -60, "scale", "Size", 0.3, 2.5, 0.05, true),
-        PanelSlider(panel, -96, "width", "Width", 0.5, 1.5, 0.05, true),
-        PanelSlider(panel, -158, "opacity", "Map Opacity", 0, 1, 0.05),
-        PanelSlider(panel, -194, "pinOpacity", "Objectives Opacity", 0.1, 1, 0.05),
-        PanelSlider(panel, -230, "markerSize", "Marker Size", 0.5, 2.5, 0.05),
-        PanelCycle(panel, -266, "style", "Style", STYLE_CHOICES),
-        PanelCycle(panel, -290, "edge", "Soft Edges", EDGE_CHOICES, StandardStyle),
-        PanelCycle(panel, -314, "shape", "Shape", SHAPE_CHOICES, StandardStyle),
-        PanelCheck(panel, -344, "onlyMe", "Only My Arrow"),
-        PanelCheck(panel, -366, "follow", "Follow Me"),
-        PanelCheck(panel, -388, "rememberZoom", "Remember Zoom"),
-        PanelCheck(panel, -410, "clickThrough", "Click Through (Shift: use the map)"),
-        PanelCycle(panel, -440, "overlay", "Overlay Mode", { { false, "Off" }, { true, "On" } }),
-    }
-    -- Apply for size and width, lit only while there is something to apply
-    local apply = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    apply:SetHeight(20)
-    apply:SetPoint("TOPLEFT", 10, -130)
-    apply:SetPoint("TOPRIGHT", -10, -130)
-    apply:SetText("Apply Size & Width")
-    apply:SetScript("OnClick", function()
-        for key, v in pairs(pending) do db[key] = v end
-        wipe(pending)
-        panel:UpdateApply()
-        ApplyShape()
-    end)
-    function panel:UpdateApply()
-        if next(pending) then apply:Enable() else apply:Disable() end
+    -- (the first time: the sections changed less often start folded)
+    if type(db.panelFolded) ~= "table" then db.panelFolded = { Style = true, Behavior = true } end
+    local rows, section = {}, nil
+    -- a row: a frame across the panel, `height` tall; shown when its section is unfolded and
+    -- `when` (if any) says so
+    local function Row(height, when)
+        local f = CreateFrame("Frame", nil, panel)
+        f:SetHeight(height)
+        f.height, f.section, f.when = height, section, when
+        f.Refresh = function() end
+        rows[#rows + 1] = f
+        return f
     end
-    local more = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    more:SetHeight(20)
-    more:SetPoint("BOTTOMLEFT", 10, 34)
-    more:SetPoint("BOTTOMRIGHT", -10, 34)
-    more:SetText("Move the Map")
-    more:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("move") end)
+    -- a section title: click it to fold or unfold the rows under it
+    local function Section(name)
+        section = nil
+        local f = Row(22)
+        local b = CreateFrame("Button", nil, f)
+        b:SetPoint("TOPLEFT", 8, -4)
+        b:SetPoint("BOTTOMRIGHT", -8, 0)
+        local sign = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        sign:SetPoint("LEFT", 4, 0)
+        local text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        text:SetPoint("LEFT", 16, 0)
+        text:SetText(name)
+        local line = b:CreateTexture(nil, "ARTWORK")
+        line:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+        line:SetHeight(1)
+        line:SetPoint("LEFT", text, "RIGHT", 6, 0)
+        line:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+        b:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
+        b:GetHighlightTexture():SetAlpha(0.25)
+        b:SetScript("OnClick", function()
+            db.panelFolded[name] = not db.panelFolded[name] or nil
+            RefreshPanel()
+        end)
+        f.Refresh = function() sign:SetText(db.panelFolded[name] and "+" or "-") end
+        section = name
+    end
+
+    PanelCheck(Row(28), "overlay", "Overlay Mode (full screen)")
+    Section("Map")
+    PanelSlider(Row(36, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
+    PanelSlider(Row(36, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
+    do
+        -- Apply for size and width, lit only while there is something to apply
+        local f = Row(28, NotOverlay)
+        local apply = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        apply:SetHeight(20)
+        apply:SetPoint("TOPLEFT", 10, 0)
+        apply:SetPoint("TOPRIGHT", -10, 0)
+        apply:SetText("Apply Size & Width")
+        apply:SetScript("OnClick", function()
+            for key, v in pairs(pending) do db[key] = v end
+            wipe(pending)
+            panel:UpdateApply()
+            ApplyShape()
+        end)
+        function panel:UpdateApply()
+            if next(pending) then apply:Enable() else apply:Disable() end
+        end
+    end
+    PanelSlider(Row(38), "opacity", "Map Opacity", 0, 1, 0.05)
+    Section("Markers")
+    PanelSlider(Row(36), "pinOpacity", "Marker Opacity", 0.1, 1, 0.05)
+    PanelSlider(Row(38), "markerSize", "Marker Size", 0.5, 2.5, 0.05)
+    PanelCheck(Row(22), "onlyMe", "Only My Arrow")
+    PanelCheck(Row(26), "arrowCustom", "My Arrow: Own Size & Opacity")
+    PanelSlider(Row(36, ArrowOwn), "arrowSize", "My Arrow Size", 0.5, 3, 0.05)
+    PanelSlider(Row(38, ArrowOwn), "arrowOpacity", "My Arrow Opacity", 0.1, 1, 0.05)
+    Section("Style")
+    PanelCycle(Row(24), "style", "Style", STYLE_CHOICES)
+    PanelCycle(Row(24), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
+    PanelCycle(Row(28), "shape", "Shape", SHAPE_CHOICES, StandardStyle)
+    Section("Behavior")
+    PanelCheck(Row(22), "clickThrough", "Click Through (Shift: use the map)")
+    PanelCheck(Row(22), "follow", "Follow Me")
+    PanelCheck(Row(26), "rememberZoom", "Remember Zoom")
+    panel.rows = rows
+
+    local move = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    move:SetHeight(20)
+    move:SetPoint("BOTTOMLEFT", 10, 34)
+    move:SetPoint("BOTTOMRIGHT", -10, 34)
+    move:SetText("Move the Map")
+    move:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("move") end)
     local all = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     all:SetHeight(20)
     all:SetPoint("BOTTOMLEFT", 10, 10)
     all:SetPoint("BOTTOMRIGHT", -10, 10)
     all:SetText("All Options")
     all:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("") end)
+
+    local function Layout()
+        local y = -32
+        for _, f in ipairs(rows) do
+            local shown = not (f.section and db.panelFolded[f.section]) and (not f.when or f.when())
+            f:SetShown(shown)
+            if shown then
+                f:ClearAllPoints()
+                f:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, y)
+                f:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, y)
+                y = y - f.height
+            end
+        end
+        panel:SetHeight(-y + 4 + 58)
+        move:SetEnabled(not db.overlay)
+    end
+
     panel:SetScript("OnShow", function(self)
-        for _, row in ipairs(self.rows) do row:Refresh() end
+        for _, f in ipairs(self.rows) do f:Refresh() end
+        Layout()
         self:UpdateApply()
+        PlacePanel()
     end)
     RefreshPanel = function()
         if panel:IsShown() then panel:GetScript("OnShow")(panel) end
@@ -1746,9 +2023,7 @@ local function BuildMapButton()
         if panel:IsShown() then
             panel:Hide()
         else
-            panel:ClearAllPoints()
-            panel:SetPoint("TOPLEFT", mapButton, "TOPRIGHT", 6, 0)
-            panel:Show()
+            panel:Show() -- (placed as it shows: PlacePanel)
         end
     end)
     mapButton:SetScript("OnEnter", function(self)
@@ -1812,33 +2087,76 @@ local function BuildOptions()
         options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
             return string.format("%d%%", value * 100 + 0.5)
         end)
-        Settings.CreateSlider(category, Register(key, name), options, tooltip)
+        return Settings.CreateSlider(category, Register(key, name), options, tooltip)
     end
 
+    local function Header(name)
+        if layout and CreateSettingsListSectionHeaderInitializer then
+            layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(name))
+        end
+    end
+
+    local function Button(name, label, fn, tooltip)
+        if not (layout and CreateSettingsButtonInitializer) then return end
+        local init = CreateSettingsButtonInitializer(name, label, fn, tooltip, false)
+        layout:AddInitializer(init)
+        return init
+    end
+
+    -- greyed out while the parent's predicate says no
+    local function Under(parent, init, predicate)
+        if parent and init and init.SetParentInitializer then init:SetParentInitializer(parent, predicate) end
+    end
+
+    local overlayInit = Settings.CreateCheckbox(category, Register("overlay", "Overlay Mode"),
+        "One switch for an overlay map: the map fills the whole screen, see-through and click-through, "
+        .. "with solid markers and large soft edges. It keeps its own Map Opacity, Marker Opacity, Marker Size, My Arrow, "
+        .. "Style, Soft Edges, Shape, Click Through and Keep Opacity While Moving: what you change while it's "
+        .. "on stays with Overlay Mode, and the normal map keeps its own. Size, width and position don't apply "
+        .. "while it's on.")
+
+    Header("Map")
     Settings.CreateDropdown(category, Register("mode", "Key"), function()
         local container = Settings.CreateControlTextContainer()
         container:Add("hold", "Hold to show")
         container:Add("press", "Press to show or hide")
         return container:GetData()
     end, "Hold: the map shows while you hold the key. Press: one press shows it, the next one hides it.")
-
-    Slider("scale", "Size", "Size of the map.", 0.3, 2.5, 0.05)
-    Slider("width", "Width", "Width of the map compared to its usual shape. Lower makes it more square; "
-        .. "the map then zooms in to fill it, centred on you.", 0.5, 1.5, 0.05)
+    Under(overlayInit, Slider("scale", "Size", "Size of the map. Overlay Mode fills the screen instead.", 0.3, 2.5, 0.05), NotOverlay)
+    Under(overlayInit, Slider("width", "Width", "Width of the map compared to its usual shape. Lower makes it "
+        .. "more square; the map then zooms in to fill it, centred on you. Overlay Mode fills the screen instead.",
+        0.5, 1.5, 0.05), NotOverlay)
     Slider("opacity", "Map Opacity", "How see-through the map itself is. At 0%, only the markers show, "
         .. "floating over the world.", 0, 1, 0.05)
-    Slider("pinOpacity", "Objectives Opacity",
+    Under(overlayInit, Button("Position", "Move", ShowMover,
+        "Shows a box the size of the map. Drag it, then right-click it when done."), NotOverlay)
+    Under(overlayInit, Button("", "Reset Position", function()
+        db.x, db.y = 0, 0
+        if mover and mover:IsShown() then ShowMover() end
+        ApplyLook()
+    end, "Puts the map back in the middle of the screen."), NotOverlay)
+
+    Header("Markers")
+    Slider("pinOpacity", "Marker Opacity",
         "How see-through the markers on the map are: quests, vendors, flight points, your arrow and other addons' markers.",
         0.1, 1, 0.05)
     Slider("markerSize", "Marker Size", "Size of the markers on the map, Questie's and OpenMap's icons too "
         .. "(on top of OpenMap's own Icon size).", 0.5, 2.5, 0.05)
-    Settings.CreateCheckbox(category, Register("noFade", "Keep Opacity While Moving"),
-        "With this off, the map fades to half while you move, like the game's own map.")
-    Settings.CreateCheckbox(category, Register("hideMinimap", "Hide Minimap"),
-        "Hides the minimap while the map is open.")
-    if layout and CreateSettingsListSectionHeaderInitializer then
-        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Style"))
+    Settings.CreateCheckbox(category, Register("onlyMe", "Only My Arrow"),
+        "Hides every marker on the map (quests, vendors, Questie's and OpenMap's icons) except your own "
+        .. "arrow. The map's picture stays.")
+    local arrowInit = Settings.CreateCheckbox(category, Register("arrowCustom", "My Arrow: Own Size & Opacity"),
+        "Your arrow on the map at a size and opacity of its own, apart from the other markers. "
+        .. "On the game's map (without OpenMap), the opacity is also your party's dots'.")
+    for _, init in ipairs({
+        Slider("arrowSize", "My Arrow Size", "Size of your arrow on the map.", 0.5, 3, 0.05),
+        Slider("arrowOpacity", "My Arrow Opacity", "How see-through your arrow on the map is.", 0.1, 1, 0.05),
+    }) do
+        Under(arrowInit, init, ArrowOwn)
+        if init and init.AddShownPredicate then init:AddShownPredicate(ArrowOwn) end
     end
+
+    Header("Style")
     local styleInit = Settings.CreateDropdown(category, Register("style", "Map Style"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(STYLE_CHOICES) do container:Add(c[1], c[2]) end
@@ -1858,34 +2176,27 @@ local function BuildOptions()
     end, "The shape the map fades into: a rectangle with rounded corners, a diamond or an oval. "
         .. "With a diamond or an oval, the corners of the map fade away completely; with Soft Edges off, "
         .. "the map is cut sharp in that shape. Standard style only.")
-    -- (greyed out with the Torn Parchment style)
-    for _, init in ipairs({ edgeInit, shapeInit }) do
-        if init and init.SetParentInitializer and styleInit then
-            init:SetParentInitializer(styleInit, StandardStyle)
-        end
-    end
-    if layout and CreateSettingsListSectionHeaderInitializer then
-        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("More"))
-    end
-    Settings.CreateCheckbox(category, Register("overlay", "Overlay Mode"),
-        "One switch for an overlay map: big, in the middle of the screen, see-through, with solid markers "
-        .. "and large soft edges. Turning it off puts back the size, width, position, opacities and edges you had.")
-    Settings.CreateCheckbox(category, Register("onlyMe", "Only My Arrow"),
-        "Hides every marker on the map (quests, vendors, Questie's and OpenMap's icons) except your own "
-        .. "arrow. The map's picture stays.")
+    Under(styleInit, edgeInit, StandardStyle)
+    Under(styleInit, shapeInit, StandardStyle)
+
+    Header("Behavior")
     Settings.CreateCheckbox(category, Register("clickThrough", "Click Through"),
         "The mouse goes through the map to the world behind it, so you can click and turn your character "
         .. "with the right button over it. Markers still show their names. Hold Shift to drag and zoom the map. "
-        .. "Overlay mode turns this on.")
+        .. "Overlay Mode turns this on.")
+    Settings.CreateCheckbox(category, Register("follow", "Follow Me"),
+        "Keeps the map centred on you while it's open, like the minimap. It holds still while the mouse is "
+        .. "over the map (in Overlay Mode, over a marker, or with Shift held). Without OpenMap, zoom in "
+        .. "with the mouse wheel to see it move: zoomed all the way out, the whole zone already fits.")
     Settings.CreateCheckbox(category, Register("rememberZoom", "Remember Zoom"),
         "Opens at the zoom the map had when you last closed it, apart from the normal map's. With OpenMap, "
         .. "OpenMap's own reopen option still decides where it's centred.")
-    Settings.CreateCheckbox(category, Register("follow", "Follow Me"),
-        "Keeps the map centred on you while it's open, like the minimap. Zoom in with the mouse wheel "
-        .. "to see it move: zoomed all the way out, the whole zone already fits.")
-    if layout and CreateSettingsListSectionHeaderInitializer then
-        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Also Hide While the Map Is Open"))
-    end
+    Settings.CreateCheckbox(category, Register("noFade", "Keep Opacity While Moving"),
+        "With this off, the map fades to half while you move, like the game's own map.")
+    Settings.CreateCheckbox(category, Register("hideMinimap", "Hide Minimap"),
+        "Hides the minimap while the map is open.")
+
+    Header("Also Hide While the Map Is Open")
     for _, group in ipairs(HIDE_GROUPS) do
         Settings.CreateCheckbox(category, Register(group.key, group.label),
             "Hidden while the map is open, and back when it closes.")
@@ -1894,9 +2205,8 @@ local function BuildOptions()
         "The names above players', NPCs' and pets' heads, hidden while the map is open and back as they "
         .. "were when it closes. The game doesn't allow changing them in combat: then they're hidden, or "
         .. "come back, when combat ends.")
-    if layout and CreateSettingsListSectionHeaderInitializer then
-        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Options Button"))
-    end
+
+    Header("Options Button")
     Settings.CreateDropdown(category, Register("buttonMode", "Options Button"), function()
         local container = Settings.CreateControlTextContainer()
         container:Add("hover", "On hover")
@@ -1917,16 +2227,6 @@ local function BuildOptions()
         end)
         Settings.CreateSlider(category, Register("buttonSize", "Options Button Size"), options,
             "Size of the options button, in pixels.")
-    end
-
-    if CreateSettingsButtonInitializer then
-        layout:AddInitializer(CreateSettingsButtonInitializer("Position", "Move",
-            ShowMover, "Shows a box the size of the map. Drag it, then right-click it when done.", false))
-        layout:AddInitializer(CreateSettingsButtonInitializer("", "Reset Position", function()
-            db.x, db.y = 0, 0
-            if mover and mover:IsShown() then ShowMover() end
-            ApplyLook()
-        end, "Puts the map back in the middle of the screen.", false))
     end
 
     Settings.RegisterAddOnCategory(category)
@@ -1951,7 +2251,8 @@ function OverlayMap_Debug()
         return b ~= nil and (f(a) .. ", " .. f(b)) or f(a)
     end
     Say("debug. Client " .. tostring((select(4, GetBuildInfo()))) .. ", Overlay Map open: " .. tostring(compact))
-    Say("Saved: size " .. f(db.scale) .. ", map " .. f(db.opacity) .. ", objectives " .. f(db.pinOpacity))
+    Say("Saved: size " .. f(db.scale) .. ", map " .. f(db.opacity) .. ", markers " .. f(db.pinOpacity)
+        .. ", overlay mode " .. tostring(db.overlay and true or false))
     Say("Map frame: shown " .. try(map, "IsShown") .. ", scale " .. try(map, "GetScale")
         .. ", effective " .. try(map, "GetEffectiveScale") .. ", size " .. try(map, "GetSize")
         .. ", alpha " .. try(map, "GetAlpha"))

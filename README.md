@@ -11,8 +11,9 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 - **Hold or press**: the map shows while you hold the key, or one press shows it and the next hides it.
 - **Size and width**: make the map bigger or smaller, and narrower (more square) or wider.
 - **Two opacities**: one for the map itself and one for the markers on it, so the map can fade into the background while quests and vendors stay clear. Hovering a marker shows its name, as on the normal map.
-- **Overlay mode**: one switch that makes it big, in the middle of the screen, see-through and click-through, with solid markers and large soft edges. Turning it off puts back what you had.
+- **Overlay mode**: one switch that makes the map fill the whole screen, see-through and click-through, with solid markers and large soft edges. The options panel then opens inside the map. It keeps its own look (opacities, marker size, style, soft edges, shape, click through), apart from the normal map's: change it while it's on, and the next time it's the same.
 - **Click through**: the mouse goes through the map to the world, so you can still click and turn your character with the right button over it. Markers still show their names; hold Shift to drag and zoom the map. Overlay mode turns it on.
+- **My arrow**: your arrow can have its own size and opacity, apart from the other markers.
 - **Markers only**: set the map's opacity to 0% and only the markers float over the world.
 - **Remember zoom**: opens at the zoom it had when you last closed it, apart from the normal map's.
 - **Only my arrow**: hides every marker except your own arrow.
@@ -46,7 +47,7 @@ The commands are now `/omap` and `/overlaymap`.
 
 ## Options and commands
 
-All the options are in **Options > AddOns > Overlay Map**. Most of them are also in the small panel that the arrow button on the map opens. In that panel, size and width change when you press **Apply Size & Width**.
+All the options are in **Options > AddOns > Overlay Map**. Most of them are also in the small panel that the arrow button on the map opens. In that panel, click a section's title to fold or unfold it, and size and width change when you press **Apply Size & Width**.
 
 | Command | What it does |
 |---|---|
@@ -60,7 +61,7 @@ All the options are in **Options > AddOns > Overlay Map**. Most of them are also
 ## Other addons
 
 - **OpenMap**: works with it. OpenMap keeps the map window where it saved it, so Overlay Map moves only the map inside it. Leave OpenMap's own "fade while moving" at 0 and use Overlay Map's instead, or the two will fight while you walk. With OpenMap, changing the width shows more or less of the world at the sides instead of zooming.
-- **Questie**: its markers show on the map and take the objectives' opacity.
+- **Questie**: its markers show on the map and take the markers' opacity.
 - **SexyMap**: its minimap (with its clock, zone name and buttons) is hidden with the rest.
 
 ## Good to know
@@ -94,8 +95,9 @@ Usa el mapa del propio juego, así que todo lo que hay en él también se ve: mi
 - **Mantener o presionar**: el mapa se ve mientras mantienes la tecla, o una pulsación lo abre y la siguiente lo cierra.
 - **Tamaño y ancho**: el mapa más grande o más chico, y más angosto (más cuadrado) o más ancho.
 - **Dos opacidades**: una para el mapa y otra para los indicadores, así el mapa puede quedar de fondo mientras las misiones y vendedores se ven claros. Al pasar el mouse sobre un indicador se ve su nombre, como en el mapa normal.
-- **Modo superpuesto**: un interruptor que lo deja grande, al centro de la pantalla, transparente y con clic a través, con los indicadores sólidos y bordes suaves grandes. Al apagarlo vuelve lo que tenías.
+- **Modo superpuesto**: un interruptor que hace que el mapa llene toda la pantalla, transparente y con clic a través, con los indicadores sólidos y bordes suaves grandes. El panel de opciones se abre entonces dentro del mapa. Guarda su propio aspecto (opacidades, tamaño de los indicadores, estilo, bordes suaves, forma, clic a través), aparte del mapa normal: lo que cambies mientras está activo se mantiene para la próxima vez. Al apagarlo vuelve lo que tenías.
 - **Clic a través**: el mouse atraviesa el mapa hacia el mundo, así puedes seguir haciendo clic y girar a tu personaje con el botón derecho sobre él. Los indicadores siguen mostrando sus nombres; mantén Shift para arrastrar el mapa y hacer zoom. El modo superpuesto lo activa.
+- **Mi flecha**: tu flecha puede tener su propio tamaño y opacidad, aparte de los demás indicadores.
 - **Solo indicadores**: con la opacidad del mapa en 0%, solo los indicadores flotan sobre el mundo.
 - **Recordar el zoom**: abre con el zoom que tenía la última vez que lo cerraste, aparte del mapa normal.
 - **Solo mi flecha**: oculta todos los indicadores menos tu propia flecha.
@@ -129,7 +131,7 @@ Los comandos ahora son `/omap` y `/overlaymap`.
 
 ## Opciones y comandos
 
-Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría también están en el panel pequeño que abre el botón con la flecha en el mapa. En ese panel, el tamaño y el ancho cambian al presionar **Apply Size & Width**.
+Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría también están en el panel pequeño que abre el botón con la flecha en el mapa. En ese panel, haz clic en el título de una sección para plegarla o desplegarla, y el tamaño y el ancho cambian al presionar **Apply Size & Width**.
 
 | Comando | Qué hace |
 |---|---|
