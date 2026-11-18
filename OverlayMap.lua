@@ -13,6 +13,8 @@ local DEFAULTS = {
     width = 1,       -- width of the map compared to its usual shape (lower: more square)
     opacity = 0.85,  -- opacity of the map itself
     pinOpacity = 1,  -- opacity of the markers on it (quests, vendors, your arrow...)
+    markerSize = 1,  -- size of the markers (the game's own setting for the map's markers)
+    onlyMe = false,  -- hide every marker except your own arrow
     noFade = true,   -- keep that opacity while moving (the game fades the map while you move)
     hideMinimap = true, -- hide the minimap while the map is open
     follow = false,  -- keep the map centred on you while it's open, like the minimap
@@ -858,6 +860,7 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     HideExtras()
     if db.hideMinimap then HideMinimap() end
     if db.clickThrough then ApplyClickThrough() end -- (in case something gave the mouse back)
+    if db.onlyMe then ApplyOnlyMe() end -- (new markers)
     edgeAcc = edgeAcc + 1
     if edgeAcc >= 5 then -- (once a second, for anything the events missed)
         edgeAcc = 0
@@ -986,11 +989,90 @@ ApplyClickThrough = function(force)
     end
 end
 
+-- Only my arrow: every marker on the map is hidden except your own arrow (the game's, or
+-- OpenMap's when it draws its own). The map's picture (explored areas, highlights) stays. Hidden
+-- markers are made invisible and stop noticing the mouse (no tooltips from invisible markers);
+-- the map and other addons set those up again now and then, which is undone the moment it
+-- happens, so nothing blinks.
+local onlyHidden = {}  -- frame -> { alpha, motion } it had
+local onlyKeeping = false
+
+local function KeepOnlyHidden(f)
+    local was = onlyHidden[f]
+    if onlyKeeping or not was then return end
+    onlyKeeping = true
+    if f:GetAlpha() > 0 then f:SetAlpha(0) end
+    if f.IsMouseMotionEnabled and f:IsMouseMotionEnabled() then pcall(f.SetMouseMotionEnabled, f, false) end
+    onlyKeeping = false
+end
+
+local onlyHooked = setmetatable({}, { __mode = "k" })
+local function HideMarker(f)
+    if onlyHidden[f] or f:IsForbidden() then return end
+    onlyHidden[f] = { alpha = f:GetAlpha(), motion = f.IsMouseMotionEnabled and f:IsMouseMotionEnabled() }
+    if not onlyHooked[f] then
+        onlyHooked[f] = true
+        for _, method in ipairs({ "SetAlpha", "EnableMouse", "SetMouseMotionEnabled" }) do
+            if f[method] then hooksecurefunc(f, method, KeepOnlyHidden) end
+        end
+    end
+    KeepOnlyHidden(f)
+end
+
+-- A marker and the frames inside it (Questie's icon sits inside its marker).
+local function HideMarkerTree(f, depth)
+    HideMarker(f)
+    if depth > 0 then
+        for _, child in ipairs({ f:GetChildren() }) do HideMarkerTree(child, depth - 1) end
+    end
+end
+
+-- OpenMap's own arrow: a frame holding just the minimap's arrow picture.
+local function IsArrow(f)
+    for _, r in ipairs({ f:GetRegions() }) do
+        if r:GetObjectType() == "Texture" then
+            local path = r.GetTextureFilePath and r:GetTextureFilePath() or r:GetTexture()
+            if type(path) == "string" and path:lower():find("minimaparrow") then return true end
+        end
+    end
+    return false
+end
+
+local function ShowMarkers()
+    if not next(onlyHidden) then return end
+    onlyKeeping = true
+    for f, was in pairs(onlyHidden) do
+        onlyHidden[f] = nil
+        f:SetAlpha(was.alpha or 1)
+        if was.motion ~= nil and f.SetMouseMotionEnabled then pcall(f.SetMouseMotionEnabled, f, was.motion) end
+    end
+    onlyKeeping = false
+end
+
+local function ApplyOnlyMe()
+    if not compact or not db.onlyMe then
+        ShowMarkers()
+        return
+    end
+    for template, pool in pairs(Map().pinPools or {}) do
+        if not MAP_ART[template] and template ~= "GroupMembersPinTemplate" and pool.EnumerateActive then
+            for pin in pool:EnumerateActive() do HideMarkerTree(pin, 2) end
+        end
+    end
+    for f in pairs(iconLayers) do
+        for _, child in ipairs({ f:GetChildren() }) do
+            if not IsArrow(child) then HideMarkerTree(child, 2) end
+        end
+    end
+end
+
 local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
     if not compact then return end
     local map = Map()
+    -- Markers' size: the game's own setting for all of the map's markers (Questie's too).
+    if map.SetGlobalPinScale then pcall(map.SetGlobalPinScale, map, db.markerSize or 1) end
     ApplySize()
     ApplyOpacity()
     if PlayerMovementFrameFader and PlayerMovementFrameFader.RemoveFrame then
@@ -1002,6 +1084,7 @@ ApplyLook = function()
     if db.hideNames then HideNames() else ShowNames() end
     ApplyEdges()
     ApplyClickThrough()
+    ApplyOnlyMe()
     UpdateMapButton()
 end
 
@@ -1075,8 +1158,10 @@ local function Restore()
     ShowNames()
     Unmask()
     ApplyClickThrough() -- (compact is off: everything takes the mouse again)
+    ShowMarkers()
     RestoreSize()
     RestoreOpacity()
+    if before.pinScale and map.SetGlobalPinScale then pcall(map.SetGlobalPinScale, map, before.pinScale) end
     wipe(iconLayers)
     settling = false
     map:SetAlpha(before.alpha or 1)
@@ -1112,6 +1197,7 @@ local function Open()
 
     compact = true
     before.alpha = map:GetAlpha()
+    before.pinScale = map.GetGlobalPinScale and map:GetGlobalPinScale() or nil
     -- The map frame stays its full size around the smaller map area; it must not take clicks.
     before.mouse = map:IsMouseEnabled()
     if before.mouse then map:EnableMouse(false) end
@@ -1413,7 +1499,7 @@ end
 
 local function BuildPanel()
     panel = CreateFrame("Frame", "OverlayMapPanel", UIParent, "BackdropTemplate")
-    panel:SetSize(230, 516)
+    panel:SetSize(230, 530)
     panel:SetFrameStrata("FULLSCREEN_DIALOG")
     panel:SetClampedToScreen(true)
     panel:EnableMouse(true)
@@ -1435,15 +1521,15 @@ local function BuildPanel()
         PanelSlider(panel, -96, "width", "Width", 0.5, 1.5, 0.05, true),
         PanelSlider(panel, -158, "opacity", "Map Opacity", 0, 1, 0.05),
         PanelSlider(panel, -194, "pinOpacity", "Objectives Opacity", 0.1, 1, 0.05),
-        PanelCycle(panel, -230, "style", "Style", STYLE_CHOICES),
-        PanelCycle(panel, -254, "edge", "Soft Edges", EDGE_CHOICES, StandardStyle),
-        PanelCycle(panel, -278, "shape", "Shape", SHAPE_CHOICES, StandardStyle),
-        PanelCheck(panel, -308, "noFade", "Keep Opacity While Moving"),
-        PanelCheck(panel, -330, "hideMinimap", "Hide Minimap"),
-        PanelCheck(panel, -352, "follow", "Follow Me"),
-        PanelCheck(panel, -374, "rememberZoom", "Remember Zoom"),
-        PanelCheck(panel, -396, "clickThrough", "Click Through (Shift: use the map)"),
-        PanelCycle(panel, -426, "overlay", "Overlay Mode", { { false, "Off" }, { true, "On" } }),
+        PanelSlider(panel, -230, "markerSize", "Marker Size", 0.5, 2.5, 0.05),
+        PanelCycle(panel, -266, "style", "Style", STYLE_CHOICES),
+        PanelCycle(panel, -290, "edge", "Soft Edges", EDGE_CHOICES, StandardStyle),
+        PanelCycle(panel, -314, "shape", "Shape", SHAPE_CHOICES, StandardStyle),
+        PanelCheck(panel, -344, "onlyMe", "Only My Arrow"),
+        PanelCheck(panel, -366, "follow", "Follow Me"),
+        PanelCheck(panel, -388, "rememberZoom", "Remember Zoom"),
+        PanelCheck(panel, -410, "clickThrough", "Click Through (Shift: use the map)"),
+        PanelCycle(panel, -440, "overlay", "Overlay Mode", { { false, "Off" }, { true, "On" } }),
     }
     -- Apply for size and width, lit only while there is something to apply
     local apply = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -1597,6 +1683,8 @@ local function BuildOptions()
     Slider("pinOpacity", "Objectives Opacity",
         "How see-through the markers on the map are: quests, vendors, flight points, your arrow and other addons' markers.",
         0.1, 1, 0.05)
+    Slider("markerSize", "Marker Size", "Size of the markers on the map (Questie's too). OpenMap's own icons "
+        .. "(vendors, mailboxes, flight points) use OpenMap's Icon size option instead.", 0.5, 2.5, 0.05)
     Settings.CreateCheckbox(category, Register("noFade", "Keep Opacity While Moving"),
         "With this off, the map fades to half while you move, like the game's own map.")
     Settings.CreateCheckbox(category, Register("hideMinimap", "Hide Minimap"),
@@ -1635,6 +1723,9 @@ local function BuildOptions()
     Settings.CreateCheckbox(category, Register("overlay", "Overlay Mode"),
         "One switch for an overlay map: big, in the middle of the screen, see-through, with solid markers "
         .. "and large soft edges. Turning it off puts back the size, width, position, opacities and edges you had.")
+    Settings.CreateCheckbox(category, Register("onlyMe", "Only My Arrow"),
+        "Hides every marker on the map (quests, vendors, Questie's and OpenMap's icons) except your own "
+        .. "arrow. The map's picture stays.")
     Settings.CreateCheckbox(category, Register("clickThrough", "Click Through"),
         "The mouse goes through the map to the world behind it, so you can click and turn your character "
         .. "with the right button over it. Markers still show their names. Hold Shift to drag and zoom the map. "

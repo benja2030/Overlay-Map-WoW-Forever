@@ -4,7 +4,13 @@
 
 ### New
 
+- **Marker Size**: makes the markers on the map (Questie's too) bigger or smaller, from 50% to 250%, in the options and the small panel. It uses the game's own setting for the map's markers, and the normal map keeps its size.
+- **Only My Arrow**: hides every marker on the map (quests, vendors, Questie's and OpenMap's icons) except your own arrow, in the options and the small panel.
 - **Also hide: Character Names**: the names above players', NPCs' and pets' heads are hidden while the map is open, and come back as they were when it closes. (The game doesn't allow changing them in combat: then it waits for combat to end.)
+
+### Changed
+
+- The small panel is shorter: Keep Opacity While Moving and Hide Minimap are now only in the main options.
 
 ### Fixed
 

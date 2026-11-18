@@ -15,6 +15,8 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 - **Click through**: the mouse goes through the map to the world, so you can still click and turn your character with the right button over it. Markers still show their names; hold Shift to drag and zoom the map. Overlay mode turns it on.
 - **Markers only**: set the map's opacity to 0% and only the markers float over the world.
 - **Remember zoom**: opens at the zoom it had when you last closed it, apart from the normal map's.
+- **Only my arrow**: hides every marker except your own arrow.
+- **Marker size**: bigger or smaller markers, from 50% to 250%.
 - **Soft edges**: the map fades out towards its edges, like the overlay maps of other games, in the shape of a rounded rectangle, a diamond or an oval (off, small, medium, large or very large).
 - **Torn Parchment style**: torn, burnt paper edges, like an old map, instead of the soft edges.
 - **Keep opacity while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
@@ -96,6 +98,8 @@ Usa el mapa del propio juego, así que todo lo que hay en él también se ve: mi
 - **Clic a través**: el mouse atraviesa el mapa hacia el mundo, así puedes seguir haciendo clic y girar a tu personaje con el botón derecho sobre él. Los indicadores siguen mostrando sus nombres; mantén Shift para arrastrar el mapa y hacer zoom. El modo superpuesto lo activa.
 - **Solo indicadores**: con la opacidad del mapa en 0%, solo los indicadores flotan sobre el mundo.
 - **Recordar el zoom**: abre con el zoom que tenía la última vez que lo cerraste, aparte del mapa normal.
+- **Solo mi flecha**: oculta todos los indicadores menos tu propia flecha.
+- **Tamaño de los indicadores**: más grandes o más pequeños, de 50% a 250%.
 - **Bordes suaves**: el mapa se desvanece hacia sus bordes, como los mapas superpuestos de otros juegos, con forma de rectángulo redondeado, rombo u óvalo (apagado, pequeño, mediano, grande o muy grande).
 - **Estilo pergamino rasgado (Torn Parchment)**: bordes de papel rasgado y quemado, como un mapa antiguo, en vez de los bordes suaves.
 - **Mantener la opacidad al moverse**: el juego desvanece su mapa mientras caminas; Overlay Map mantiene la opacidad que elegiste (o la baja a la mitad, si lo prefieres).
