@@ -33,6 +33,7 @@ local DEFAULTS = {
     buttonOpacity = 0.8,     -- with the mouse over the map (or always, with "show")
     buttonNearOpacity = 1,   -- with the mouse on the button or right next to it
     buttonSize = 22,
+    buttonCorner = "TOPRIGHT", -- the map's corner it sits in: TOPRIGHT, TOPLEFT, BOTTOMRIGHT, BOTTOMLEFT
     x = 0, y = 0,    -- position of the map's centre, from the centre of the screen
 }
 
@@ -630,6 +631,8 @@ local settling = false
 -- While the map fades out to be laid out again (ApplyShape), nothing else lays it out meanwhile:
 -- a second layout in between left it hidden. shapeGen: the latest one (an older one's steps stop).
 local reshaping, shapeGen = false, 0
+local mapButton, panel -- (the options button on the map and its small panel, further down)
+local PlaceMapButton -- (further down)
 
 -- A new width: the map works out its zoom again for the new shape. That's done once the width
 -- stops changing (not on every step of a slider), with the map hidden for that moment, since
@@ -956,6 +959,7 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     ApplyOnlyMe() -- (new markers)
     ApplyMarkerSize() -- (new markers)
     ApplyArrow()
+    if mapButton and mapButton:IsShown() then PlaceMapButton() end -- (the map grew past the screen)
     edgeAcc = edgeAcc + 1
     if edgeAcc >= 5 then -- (once a second, for anything the events missed)
         edgeAcc = 0
@@ -1656,7 +1660,6 @@ end
 -- The options button on the map, and the small panel it opens
 --------------------------------------------------------------------------------
 
-local mapButton, panel
 local EDGE_CHOICES = { { 0, "Off" }, { 1, "Small" }, { 2, "Medium" }, { 3, "Large" }, { 4, "Very large" } }
 local SHAPE_CHOICES = { { "rect", "Rectangle" }, { "diamond", "Diamond" }, { "oval", "Oval" } }
 local STYLE_CHOICES = { { "standard", "Standard" }, { "torn", "Torn Parchment" } }
@@ -1839,17 +1842,27 @@ local function ArrowOwn() return db.arrowCustom and true or false end
 -- Mode, which fills the screen, or when there's no room outside.
 local function PlacePanel()
     if not panel or not mapButton then return end
+    local corner = db.buttonCorner or "TOPRIGHT"
+    local right, bottom = corner:find("RIGHT") ~= nil, corner:find("BOTTOM") ~= nil
     local inside = db.overlay
     if not inside then
-        local right = (mapButton:GetRight() or 0) * mapButton:GetEffectiveScale()
-        local screen = (UIParent:GetRight() or 0) * UIParent:GetEffectiveScale()
-        inside = right + (panel:GetWidth() + 6) * panel:GetEffectiveScale() > screen
+        -- (room beside the button, on the outside of the map's corner)
+        local need = (panel:GetWidth() + 6) * panel:GetEffectiveScale()
+        local b, u = mapButton:GetEffectiveScale(), UIParent:GetEffectiveScale()
+        if right then
+            inside = (mapButton:GetRight() or 0) * b + need > (UIParent:GetRight() or 0) * u
+        else
+            inside = (mapButton:GetLeft() or 0) * b - need < 0
+        end
     end
+    local v = bottom and "BOTTOM" or "TOP"
     panel:ClearAllPoints()
     if inside then
-        panel:SetPoint("TOPRIGHT", mapButton, "BOTTOMRIGHT", 0, -6)
+        -- (into the map: under the button, or above it in a bottom corner)
+        local side = right and "RIGHT" or "LEFT"
+        panel:SetPoint(v .. side, mapButton, (bottom and "TOP" or "BOTTOM") .. side, 0, bottom and 6 or -6)
     else
-        panel:SetPoint("TOPLEFT", mapButton, "TOPRIGHT", 6, 0)
+        panel:SetPoint(v .. (right and "LEFT" or "RIGHT"), mapButton, v .. (right and "RIGHT" or "LEFT"), right and 6 or -6, 0)
     end
 end
 
@@ -2009,6 +2022,7 @@ end
 
 local function BuildMapButton()
     mapButton = CreateFrame("Button", "OverlayMapButton", UIParent)
+    mapButton:SetClampedToScreen(true) -- (never off the screen, wherever the map is)
     mapButton:SetSize(db.buttonSize, db.buttonSize)
     local bg = mapButton:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
@@ -2044,6 +2058,40 @@ local function BuildMapButton()
     end)
 end
 
+-- In the map's top right corner; when the map is bigger than the screen there (a large Size or
+-- Width, or moved near an edge), in the corner of the part of the map that's on screen, so it can
+-- always be reached.
+PlaceMapButton = function()
+    local c = Canvas()
+    local corner = db.buttonCorner or "TOPRIGHT"
+    local right, top = corner:find("RIGHT") ~= nil, corner:find("TOP") ~= nil
+    local k = c:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    local r, t, l, b = c:GetRight(), c:GetTop(), c:GetLeft(), c:GetBottom()
+    local w, h = UIParent:GetWidth(), UIParent:GetHeight()
+    local x, y
+    if r and t then
+        r, t, l, b = r * k, t * k, l * k, b * k
+        if (right and r > w) or (not right and l < 0) or (top and t > h) or (not top and b < 0) then
+            -- the corner of the part of the map on screen (and room for the button in it)
+            local room = db.buttonSize + 8
+            local vl, vr = math.max(l, 0), math.min(r, w)
+            local vb, vt = math.max(b, 0), math.min(t, h)
+            x = right and math.max(vr, vl + room) - 4 or math.min(vl, vr - room) + 4
+            y = top and math.max(vt, vb + room) - 4 or math.min(vb, vt - room) + 4
+        end
+    end
+    local want = corner .. (x and (":" .. math.floor(x * 10) .. ":" .. math.floor(y * 10)) or ":map")
+    if mapButton.placedAt == want and mapButton:GetNumPoints() > 0 then return end
+    mapButton.placedAt = want
+    mapButton:ClearAllPoints()
+    if x then
+        mapButton:SetPoint(corner, UIParent, "BOTTOMLEFT", x, y)
+    else
+        mapButton:SetPoint(corner, c, corner, right and -4 or 4, top and -4 or 4)
+    end
+    if panel and panel:IsShown() then PlacePanel() end
+end
+
 UpdateMapButton = function()
     if not ButtonWanted() then
         if mapButton then mapButton:Hide() end
@@ -2053,8 +2101,15 @@ UpdateMapButton = function()
     if not mapButton then BuildMapButton() end
     local map = Map()
     mapButton:SetSize(db.buttonSize, db.buttonSize)
-    mapButton:ClearAllPoints()
-    mapButton:SetPoint("TOPRIGHT", Canvas(), "TOPRIGHT", -4, -4)
+    PlaceMapButton()
+    -- (once more next frame, when the map's new size and place are laid out)
+    if not mapButton.recheck then
+        mapButton.recheck = true
+        C_Timer.After(0, function()
+            mapButton.recheck = nil
+            if mapButton:IsShown() then PlaceMapButton() end
+        end)
+    end
     mapButton:SetFrameStrata("FULLSCREEN")
     mapButton:SetAlpha(MapButtonAlpha())
     mapButton:Show()
@@ -2215,6 +2270,15 @@ local function BuildOptions()
         return container:GetData()
     end, "The arrow button in the corner of the map, which opens a small panel with these options. "
         .. "On hover: it shows while the mouse is over the map.")
+    Settings.CreateDropdown(category, Register("buttonCorner", "Options Button Corner"), function()
+        local container = Settings.CreateControlTextContainer()
+        container:Add("TOPRIGHT", "Top right")
+        container:Add("TOPLEFT", "Top left")
+        container:Add("BOTTOMRIGHT", "Bottom right")
+        container:Add("BOTTOMLEFT", "Bottom left")
+        return container:GetData()
+    end, "The corner of the map the options button sits in. The small panel opens beside it, or into the "
+        .. "map when there's no room outside (always, in Overlay Mode).")
     Slider("buttonOpacity", "Options Button Opacity",
         "How see-through the options button is with the mouse over the map (or all the time, with Always). "
         .. "At 0% it only shows when the mouse gets close to it.", 0, 1, 0.05)
@@ -2412,6 +2476,8 @@ events:SetScript("OnEvent", function(self, event, name)
         if db.shape == "torn" then db.shape, db.style = DEFAULTS.shape, "torn" end -- (it was a shape before)
         if not SHAPE_FILES[db.shape] then db.shape = DEFAULTS.shape end
         if db.style ~= "standard" and db.style ~= "torn" then db.style = DEFAULTS.style end
+        local corners = { TOPRIGHT = true, TOPLEFT = true, BOTTOMRIGHT = true, BOTTOMLEFT = true }
+        if not corners[db.buttonCorner] then db.buttonCorner = DEFAULTS.buttonCorner end
         if db.buttonMode ~= "show" and db.buttonMode ~= "hover" and db.buttonMode ~= "hide" then
             db.buttonMode = "hover"
         end
