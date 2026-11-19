@@ -604,7 +604,11 @@ end
 
 -- Only what actually changed is set again: re-anchoring or re-layering a frame makes the game
 -- work out again what's under the mouse, which made hovered markers blink.
-local function Sync(f, scale)
+-- (above: how many levels over the map frame. Both layers cut their contents off at the map area's
+-- edges, and the game draws a frame that does that as one block, at its own level: the markers'
+-- layer must be over the icons' layer, or which one came out on top changed from one opening to
+-- the next. As on OpenMap's own map, the markers go over its icons.)
+local function Sync(f, scale, above)
     local map, c = Map(), Canvas()
     if math.abs(f:GetScale() - scale) > 0.0001 then f:SetScale(scale) end
     if f.syncedTo ~= c then
@@ -614,13 +618,13 @@ local function Sync(f, scale)
     end
     local strata = Above(map:GetFrameStrata())
     if f:GetFrameStrata() ~= strata then f:SetFrameStrata(strata) end
-    local level = map:GetFrameLevel() + 1
+    local level = map:GetFrameLevel() + above
     if f:GetFrameLevel() ~= level then f:SetFrameLevel(level) end
 end
 
 SyncLayer = function()
-    if viewLayer then Sync(viewLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale()) end
-    if layer then Sync(layer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale()) end
+    if viewLayer then Sync(viewLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 1) end
+    if layer then Sync(layer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 2) end
 end
 
 -- A new parent puts a frame, and the frames inside it, at new frame levels. Inside OpenMap's
@@ -636,7 +640,9 @@ end
 local function LoadLevels(f, levels, depth)
     local want = levels[f]
     local fixed = f.HasFixedFrameLevel and f:HasFixedFrameLevel()
-    if want and not fixed and f:GetFrameLevel() ~= want then f:SetFrameLevel(want) end
+    if want and not fixed and f:GetFrameLevel() ~= want and want >= 0 and want <= 65535 then
+        pcall(f.SetFrameLevel, f, want)
+    end
     if depth > 0 then
         for _, child in ipairs({ f:GetChildren() }) do LoadLevels(child, levels, depth - 1) end
     end
@@ -679,7 +685,9 @@ local function ReturnPins()
     wipe(moved)
     if layer then layer:Hide() end
     local c = Canvas()
-    for f in pairs(viewMoved) do Reparent(f, c, 5) end
+    for f in pairs(viewMoved) do
+        Reparent(f, c, 5)
+    end
     wipe(viewMoved)
     if viewLayer then viewLayer:Hide() end
 end
@@ -2417,6 +2425,34 @@ function OverlayMap_Debug()
     local twins = 0
     for f in pairs(onlyHidden) do if IsTownsfolk(f) then twins = twins + 1 end end
     Say("Questie's townsfolk icons hidden (OpenMap draws its own): " .. twins)
+    -- the draw order of the two layers: the markers' icons and the other addons' icons (levels)
+    do
+        local low, high, n = nil, nil, 0
+        local function Scan(fr, depth)
+            local l = fr:GetFrameLevel()
+            low, high = math.min(low or l, l), math.max(high or l, l)
+            if depth > 0 then for _, c in ipairs({ fr:GetChildren() }) do Scan(c, depth - 1) end end
+        end
+        for pin in pairs(moved) do
+            local w, h = pin:GetSize()
+            if pin:IsShown() and (w or 0) < 200 and (h or 0) < 200 then n = n + 1 Scan(pin, 2) end
+        end
+        Say(string.format("Order: marker layer %s, icon layer %s; %d markers, levels %s to %s",
+            layer and layer:IsShown() and (layer:GetFrameStrata() .. " " .. layer:GetFrameLevel()) or "not in use",
+            viewLayer and viewLayer:IsShown() and (viewLayer:GetFrameStrata() .. " " .. viewLayer:GetFrameLevel()) or "not in use",
+            n, tostring(low), tostring(high)))
+        for f in pairs(iconLayers) do
+            local levels = {}
+            SaveLevels(f, levels, 5)
+            local bottom, top = nil, nil
+            for fr, l in pairs(levels) do
+                if fr ~= f then bottom, top = math.min(bottom or l, l), math.max(top or l, l) end
+            end
+            Say(string.format("   icon layer: on %s (%s), level %d, its icons %s to %s",
+                f:GetParent() == viewLayer and "Overlay Map's icon layer" or "the map", f:GetFrameStrata(), f:GetFrameLevel(),
+                tostring(bottom), tostring(top)))
+        end
+    end
     if top then
         Say("  townsfolk icon: " .. tostring(top.isManualIcon) .. ", level " .. top:GetFrameLevel() .. ", strata " .. top:GetFrameStrata()
             .. ", hidden by Overlay Map: " .. tostring(onlyHidden[top] ~= nil))
@@ -2468,8 +2504,10 @@ function OverlayMap_Debug()
         if fr == viewLayer then what = what .. " [Overlay Map's icon layer]" end
         if iconLayers[fr] then what = what .. " [an addon's icon layer]" end
         local w, h = fr:GetSize()
-        return string.format("%s  %.0fx%.0f, scale %.2f (on screen %.2f), alpha %.2f%s", what, w or 0, h or 0,
-            fr:GetScale(), fr:GetEffectiveScale(), fr:GetEffectiveAlpha(), fr:IsShown() and "" or ", hidden")
+        local fixed = fr.HasFixedFrameLevel and fr:HasFixedFrameLevel()
+        return string.format("%s  %.0fx%.0f, scale %.2f (on screen %.2f), alpha %.2f, %s %d%s%s", what, w or 0, h or 0,
+            fr:GetScale(), fr:GetEffectiveScale(), fr:GetEffectiveAlpha(), fr:GetFrameStrata(), fr:GetFrameLevel(),
+            fixed and " fixed" or "", fr:IsShown() and "" or ", hidden")
     end
     local foci2 = GetMouseFoci and GetMouseFoci() or { GetMouseFocus and GetMouseFocus() }
     local f1 = foci2 and foci2[1]

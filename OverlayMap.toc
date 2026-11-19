@@ -2,7 +2,7 @@
 ## Title: Overlay Map
 ## Notes: An overlay map for WoW: Forever: the map of your zone over the world with a key, see-through, with soft or torn parchment edges, following you.
 ## Author: benja2030
-## Version: 1.1.4
+## Version: 1.1.5
 ## SavedVariables: OverlayMapDB, QuickMapDB
 
 OverlayMap.lua
