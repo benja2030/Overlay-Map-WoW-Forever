@@ -196,7 +196,8 @@ local HIDE_GROUPS = {
     { key = "hideBars", label = "Action Bars", frames = {
         "MainActionBar", "MainMenuBar", "MultiBarBottomLeft", "MultiBarBottomRight", "MultiBarRight",
         "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7", "StanceBar", "PetActionBar",
-        "PossessActionBar", "MainMenuBarVehicleLeaveButton" } },
+        "PossessActionBar", "MainMenuBarVehicleLeaveButton",
+        "MirrorBarsFrame" } },  -- (Mirror Bars' copies of the bars)
     { key = "hideUnits", label = "Player and Target Frames", frames = {
         "PlayerFrame", "TargetFrame", "FocusFrame", "PetFrame", "TargetFrameToT" } },
     { key = "hideChat", label = "Chat", frames = { "GeneralDockManager", "ChatFrameMenuButton",
@@ -247,6 +248,61 @@ local function Unhide(f)
     end
 end
 
+-- Other addons' frames: an addon may hide its own frames, even protected ones, out of combat (the
+-- game's own protected frames are left alone: hiding them from an addon caused trouble). Kept
+-- hidden while the map is open: if the addon shows one again, it's hidden again at once.
+local ADDON_FRAMES = { MirrorBarsFrame = true }
+local function AddonFrame(f)
+    local name = f.GetName and f:GetName()
+    return name and ADDON_FRAMES[name] or false
+end
+
+-- What a shield covers: the frame, or, for a frame that is only a point holding others (Mirror
+-- Bars' copies hang around a 1x1 frame), the box around what it holds.
+local function ShieldBox(sh, f)
+    sh:ClearAllPoints()
+    local w, h = f:GetSize()
+    if (w or 0) > 2 and (h or 0) > 2 then
+        sh:SetAllPoints(f)
+        return
+    end
+    local u = UIParent:GetEffectiveScale()
+    local l, b, r, t
+    for _, child in ipairs({ f:GetChildren() }) do
+        if child:IsShown() then
+            local cl, cb, cw, ch = child:GetRect()
+            if cl and cw and cw > 0 then
+                local k = child:GetEffectiveScale() / u
+                cl, cb, cw, ch = cl * k, cb * k, cw * k, ch * k
+                l, b = math.min(l or cl, cl), math.min(b or cb, cb)
+                r, t = math.max(r or cl + cw, cl + cw), math.max(t or cb + ch, cb + ch)
+            end
+        end
+    end
+    if l then
+        sh:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", l, b)
+        sh:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", r, t)
+    else
+        sh:SetAllPoints(f)
+    end
+end
+
+local hideHooked = {}
+local rehiding = false
+local function Rehide(f)
+    if rehiding or not hiddenExtra[f] or not f:IsShown() then return end
+    if f:IsProtected() and InCombatLockdown() then return end -- (the watcher fades it instead)
+    rehiding = true
+    pcall(f.Hide, f)
+    rehiding = false
+end
+local function KeepHidden(f)
+    if hideHooked[f] then return end
+    hideHooked[f] = true
+    hooksecurefunc(f, "Show", Rehide)
+    hooksecurefunc(f, "SetShown", Rehide)
+end
+
 local function Shield(f)
     local sh = shields[f]
     if not sh then
@@ -256,8 +312,7 @@ local function Shield(f)
         sh:SetScript("OnMouseWheel", function() end)
         shields[f] = sh
     end
-    sh:ClearAllPoints()
-    sh:SetAllPoints(f)
+    ShieldBox(sh, f)
     sh:SetFrameStrata("DIALOG")
     sh:SetFrameLevel(1000)
     sh:Show()
@@ -320,20 +375,24 @@ local function HideExtras()
         elseif f:IsShown() then
             -- Hidden if the game allows it; when it doesn't (it can refuse without saying so),
             -- the frame is still shown afterwards, and it's made invisible and shielded instead.
-            if not f:IsProtected() then pcall(f.Hide, f) end
+            if not f:IsProtected() or (AddonFrame(f) and not InCombatLockdown()) then pcall(f.Hide, f) end
             if f:IsShown() then
                 hiddenExtra[f] = nil
                 Fade(f)
             else
                 hiddenExtra[f] = true
+                if AddonFrame(f) then KeepHidden(f) end
             end
         end
     end
 end
 
 local function ShowExtras()
-    for f in pairs(hiddenExtra) do Unhide(f) end
+    -- (forgotten first, so the keep-hidden hook lets them show)
+    local list = {}
+    for f in pairs(hiddenExtra) do list[#list + 1] = f end
     wipe(hiddenExtra)
+    for _, f in ipairs(list) do Unhide(f) end
     for f in pairs(faded) do Unfade(f) end
 end
 
