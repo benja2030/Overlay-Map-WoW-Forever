@@ -330,6 +330,45 @@ local function KeepFaded(f)
     refading = false
 end
 
+-- The mouse of an invisible part: turned off on every piece of it that uses it (as UI Visibility
+-- does), so clicks and the camera go through to the world, remembering which pieces, so exactly
+-- those get it back. The game doesn't let addons change it on protected frames in combat: then
+-- the part is covered by the shield instead, and its mouse comes back once combat ends.
+local mouseOff = {}     -- frame -> { piece -> true }: pieces whose mouse Overlay Map turned off
+local mouseLater = {}   -- frame -> true: mouse to give back when combat ends
+
+local function Locked(f)
+    return InCombatLockdown() and f:IsProtected()
+end
+
+local function MouseOff(f)
+    local list = mouseOff[f] or {}
+    mouseOff[f] = list
+    local function Walk(piece, depth)
+        if piece:IsForbidden() then return end
+        local on = piece:IsMouseEnabled()
+        if not (issecretvalue and issecretvalue(on)) and on then
+            if pcall(piece.EnableMouse, piece, false) then list[piece] = true end
+        end
+        if depth > 0 then
+            for _, child in ipairs({ piece:GetChildren() }) do Walk(child, depth - 1) end
+        end
+    end
+    Walk(f, 4)
+end
+
+local function MouseBack(f)
+    local list = mouseOff[f]
+    if not list then return end
+    if Locked(f) then
+        mouseLater[f] = true
+        return
+    end
+    for piece in pairs(list) do pcall(piece.EnableMouse, piece, true) end
+    mouseOff[f] = nil
+    mouseLater[f] = nil
+end
+
 local function Fade(f)
     if faded[f] == nil then faded[f] = f:GetAlpha() end
     if not fadeHooked[f] then
@@ -337,8 +376,16 @@ local function Fade(f)
         hooksecurefunc(f, "SetAlpha", KeepFaded)
     end
     if f:GetAlpha() > 0 then f:SetAlpha(0) end
-    -- shielded only while it's there to be clicked
-    if f:IsVisible() then
+    mouseLater[f] = nil
+    if not Locked(f) then
+        -- (again each time: another addon, or the game, may have given a piece its mouse back)
+        MouseOff(f)
+        if shields[f] then shields[f]:Hide() end
+    elseif mouseOff[f] then
+        -- (its mouse was already off before combat: nothing to cover)
+        if shields[f] then shields[f]:Hide() end
+    elseif f:IsVisible() then
+        -- shielded only in combat, while it's there to be clicked
         if not (shields[f] and shields[f]:IsShown()) then Shield(f) end
     elseif shields[f] then
         shields[f]:Hide()
@@ -350,6 +397,7 @@ local function Unfade(f)
     faded[f] = nil -- (first, so the hook above lets this one through)
     f:SetAlpha(alpha)
     if shields[f] then shields[f]:Hide() end
+    MouseBack(f)
 end
 
 local function HideExtras()
@@ -434,6 +482,10 @@ end
 local function ExtrasLeaveCombat()
     for f in pairs(showLater) do pcall(f.Show, f) end
     wipe(showLater)
+    -- (mouse waiting for combat to end: back, unless the part is invisible again)
+    for f in pairs(mouseLater) do
+        if faded[f] == nil then MouseBack(f) end
+    end
     -- (names waiting for combat to end: hidden if the map is open with the option, back if not)
     if compact and db.hideNames then HideNames() else ShowNames() end
 end
@@ -2487,6 +2539,7 @@ function OverlayMap_Debug()
                     local sh = shields[fr]
                     parts[#parts + 1] = (fr:GetName() or "?") .. " " .. how
                         .. (fr:IsProtected() and " (protected)" or "")
+                        .. (mouseOff[fr] and ", mouse off" or "") .. (mouseLater[fr] and ", mouse back after combat" or "")
                         .. (sh and sh:IsShown() and (", shield " .. sh:GetFrameStrata() .. " "
                             .. string.format("%.0fx%.0f", sh:GetWidth(), sh:GetHeight())) or "")
                 end
