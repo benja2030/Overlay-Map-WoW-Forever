@@ -1507,6 +1507,46 @@ local function AddMask(r, m)
     return true
 end
 
+-- No room left on a picture (OpenMap's carry up to three masks of their own): one of OpenMap's is
+-- taken off while Overlay Map's are on, and put back when they come off. Without it, with Torn
+-- Parchment or soft edges and the zone border both on, OpenMap's pictures got only the zone's
+-- outline and showed past the map's edges. The one taken: the hole under a city's banner if
+-- there's one, else the colour-matching band, else the last.
+Zone.dropped = setmetatable({}, { __mode = "k" }) -- picture -> OpenMap's masks taken off it
+function Zone.MakeRoom(r)
+    if not (r.GetNumMaskTextures and r.GetMaskTexture) then return false end
+    if Zone.dropped[r] and #Zone.dropped[r] >= 2 then return false end -- (ours are two at most)
+    local n = r:GetNumMaskTextures()
+    if n == 0 then return false end
+    local pick, pickRank
+    for i = 1, n do
+        local mk = r:GetMaskTexture(i)
+        local ours = false
+        for _, kind in ipairs({ "shape", "zone" }) do
+            for _, m in pairs(masks[kind]) do if m == mk then ours = true end end
+        end
+        if mk and not ours then
+            local file = tostring(mk.GetTexture and mk:GetTexture() or ""):lower()
+            local rank = file:find("hole") and 3 or file:find("band") and 2 or 1
+            if not pickRank or rank > pickRank or (rank == pickRank) then pick, pickRank = mk, rank end
+        end
+    end
+    if not pick then return false end
+    pcall(r.RemoveMaskTexture, r, pick)
+    Zone.dropped[r] = Zone.dropped[r] or {}
+    table.insert(Zone.dropped[r], pick)
+    return true
+end
+
+-- Put back OpenMap's masks taken off pictures, as Overlay Map's come off
+function Zone.GiveBack()
+    for r, list in pairs(Zone.dropped) do
+        -- (as many back as there's room for, now that ours are fewer)
+        while #list > 0 and AddMask(r, list[#list]) do table.remove(list) end
+        if #list == 0 then Zone.dropped[r] = nil end
+    end
+end
+
 -- One frame's pictures: each gets the mask (once)
 local function MaskRegions(frame, kind, m)
     local on = maskedTex[kind]
@@ -1517,6 +1557,8 @@ local function MaskRegions(frame, kind, m)
                 if old then pcall(r.RemoveMaskTexture, r, old) end
                 on[r] = nil
                 if AddMask(r, m) then
+                    on[r] = m
+                elseif Zone.MakeRoom(r) and AddMask(r, m) then
                     on[r] = m
                 elseif kind == "zone" and maskedTex.shape[r] then
                     -- (no room for the zone's outline: it matters more than the soft edges, which
@@ -1569,6 +1611,7 @@ local function UnmaskKind(kind)
     for tex, m in pairs(maskedTex[kind]) do pcall(tex.RemoveMaskTexture, tex, m) end
     wipe(maskedTex[kind])
     wipe(Zone.walked[kind])
+    Zone.GiveBack()
     -- (the soft edges may have made room for the zone's outline on some pictures: back on them)
     if kind == "zone" then wipe(Zone.walked.shape) end
     for _, m in pairs(masks[kind]) do m:Hide() end
@@ -1606,6 +1649,8 @@ function Zone.ApplyEdgesNow(keepZone)
             if content then MaskTree(content, 0, kind) end
             if layer and layer:IsShown() then MaskTree(layer, 0, kind) end
             if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0, kind) end
+            -- (Torn Parchment's burnt rim: faded outside your zone like the rest of the map)
+            if kind == "zone" and rim and rim:IsShown() then MaskTree(rim, 0, kind) end
         elseif next(maskedTex[kind]) then
             UnmaskKind(kind)
         end
