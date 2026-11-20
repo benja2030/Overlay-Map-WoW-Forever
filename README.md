@@ -19,6 +19,7 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 - **Only my arrow**: hides every marker except your own arrow.
 - **Marker size**: bigger or smaller markers, from 50% to 250%.
 - **Soft edges**: the map fades out towards its edges, like the overlay maps of other games, in the shape of a rounded rectangle, a diamond or an oval (off, small, medium, large or very large).
+- **Zone border**: your zone stands out with its own outline (with OpenMap, the zone you're in), and the rest of the map fades behind it or hides. It goes on top of the map's shape and style, Torn Parchment included. The map can zoom to fit each new zone, and Follow me keeps the view inside your zone. Needs the separate **Overlay Map: Zone Borders** download.
 - **Torn Parchment style**: torn, burnt paper edges, like an old map, instead of the soft edges.
 - **Keep opacity while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
 - **Follow me**: keeps the map centred on you while it's open, like the minimap.
@@ -81,7 +82,7 @@ After a WoW: Forever update, the addon may stop loading. At character select, op
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE`. The zone outlines are a separate download, **Overlay Map: Zone Borders** (the `OverlayMap_ZoneBorders` folder), with their credits and licences.
 
 ---
 
@@ -104,6 +105,7 @@ Usa el mapa del propio juego, así que todo lo que hay en él también se ve: mi
 - **Solo mi flecha**: oculta todos los indicadores menos tu propia flecha.
 - **Tamaño de los indicadores**: más grandes o más pequeños, de 50% a 250%.
 - **Bordes suaves**: el mapa se desvanece hacia sus bordes, como los mapas superpuestos de otros juegos, con forma de rectángulo redondeado, rombo u óvalo (apagado, pequeño, mediano, grande o muy grande).
+- **Borde de la zona**: tu zona destaca con su propia forma (con OpenMap, la zona en que estás), y el resto del mapa se atenúa detrás o se oculta. Va encima de la forma y el estilo del mapa, Pergamino rasgado incluido. El mapa puede acercarse para que quepa cada zona nueva, y Seguirme mantiene la vista dentro de tu zona. Necesita la descarga aparte **Overlay Map: Zone Borders**.
 - **Estilo pergamino rasgado (Torn Parchment)**: bordes de papel rasgado y quemado, como un mapa antiguo, en vez de los bordes suaves.
 - **Mantener la opacidad al moverse**: el juego desvanece su mapa mientras caminas; Overlay Map mantiene la opacidad que elegiste (o la baja a la mitad, si lo prefieres).
 - **Seguirme**: mantiene el mapa centrado en ti mientras está abierto, como el minimapa.
@@ -166,4 +168,4 @@ Después de una actualización de WoW: Forever, el addon podría dejar de cargar
 
 ## Licencia
 
-MIT. Ver `LICENSE`.
+MIT. Ver `LICENSE`. Las formas de las zonas son una descarga aparte, **Overlay Map: Zone Borders** (la carpeta `OverlayMap_ZoneBorders`), con sus créditos y licencias.

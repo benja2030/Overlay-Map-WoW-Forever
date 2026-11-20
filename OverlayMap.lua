@@ -22,6 +22,14 @@ local DEFAULTS = {
     follow = false,  -- keep the map centred on you while it's open, like the minimap
     edge = 2,        -- soft edges, like an overlay map: 0 off, 1 small ... 4 very large
     shape = "rect",  -- shape of those edges: "rect" (rounded rectangle), "diamond" or "oval"
+    zoneBorder = false, -- the map cut to your zone's outline (on top of the shape and style)
+    zoneSoft = true, -- the zone's outline faded in from the border (off: cut sharp)
+    zoneDim = 0.3,   -- with the zone border: how much of the rest of the map shows (0: hidden; 5% steps)
+    zoneFit = true,  -- with the zone border: entering a new zone, the map zooms so it fits
+    zoneFitOpen = false, -- with the zone border: every time the map opens, zoomed to fit your zone
+    zoneView = false, -- with the zone border and OpenMap: the outline is the zone in the middle of the view
+    zoneKeep = true, -- with the zone border and OpenMap: over the sea or land of no zone, the outline stays
+    zoneWhole = 0.45, -- with the zone border and OpenMap: the whole map once the zone fills less of the view
     style = "standard", -- map style: "standard", or "torn" (torn parchment: torn, burnt paper edges)
     rememberZoom = true, -- open at the zoom Overlay Map's map had when it last closed
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
@@ -248,18 +256,19 @@ local function Unhide(f)
     end
 end
 
+local Keep = {}
 -- Other addons' frames: an addon may hide its own frames, even protected ones, out of combat (the
 -- game's own protected frames are left alone: hiding them from an addon caused trouble). Kept
 -- hidden while the map is open: if the addon shows one again, it's hidden again at once.
-local ADDON_FRAMES = { MirrorBarsFrame = true }
-local function AddonFrame(f)
+Keep.ADDON_FRAMES = { MirrorBarsFrame = true }
+function Keep.AddonFrame(f)
     local name = f.GetName and f:GetName()
-    return name and ADDON_FRAMES[name] or false
+    return name and Keep.ADDON_FRAMES[name] or false
 end
 
 -- What a shield covers: the frame, or, for a frame that is only a point holding others (Mirror
 -- Bars' copies hang around a 1x1 frame), the box around what it holds.
-local function ShieldBox(sh, f)
+function Keep.ShieldBox(sh, f)
     sh:ClearAllPoints()
     local w, h = f:GetSize()
     if (w or 0) > 2 and (h or 0) > 2 then
@@ -287,20 +296,20 @@ local function ShieldBox(sh, f)
     end
 end
 
-local hideHooked = {}
-local rehiding = false
-local function Rehide(f)
-    if rehiding or not hiddenExtra[f] or not f:IsShown() then return end
+Keep.hideHooked = {}
+Keep.rehiding = false
+function Keep.Rehide(f)
+    if Keep.rehiding or not hiddenExtra[f] or not f:IsShown() then return end
     if f:IsProtected() and InCombatLockdown() then return end -- (the watcher fades it instead)
-    rehiding = true
+    Keep.rehiding = true
     pcall(f.Hide, f)
-    rehiding = false
+    Keep.rehiding = false
 end
-local function KeepHidden(f)
-    if hideHooked[f] then return end
-    hideHooked[f] = true
-    hooksecurefunc(f, "Show", Rehide)
-    hooksecurefunc(f, "SetShown", Rehide)
+function Keep.KeepHidden(f)
+    if Keep.hideHooked[f] then return end
+    Keep.hideHooked[f] = true
+    hooksecurefunc(f, "Show", Keep.Rehide)
+    hooksecurefunc(f, "SetShown", Keep.Rehide)
 end
 
 local function Shield(f)
@@ -312,7 +321,7 @@ local function Shield(f)
         sh:SetScript("OnMouseWheel", function() end)
         shields[f] = sh
     end
-    ShieldBox(sh, f)
+    Keep.ShieldBox(sh, f)
     sh:SetFrameStrata("DIALOG")
     sh:SetFrameLevel(1000)
     sh:Show()
@@ -423,13 +432,13 @@ local function HideExtras()
         elseif f:IsShown() then
             -- Hidden if the game allows it; when it doesn't (it can refuse without saying so),
             -- the frame is still shown afterwards, and it's made invisible and shielded instead.
-            if not f:IsProtected() or (AddonFrame(f) and not InCombatLockdown()) then pcall(f.Hide, f) end
+            if not f:IsProtected() or (Keep.AddonFrame(f) and not InCombatLockdown()) then pcall(f.Hide, f) end
             if f:IsShown() then
                 hiddenExtra[f] = nil
                 Fade(f)
             else
                 hiddenExtra[f] = true
-                if AddonFrame(f) then KeepHidden(f) end
+                if Keep.AddonFrame(f) then Keep.KeepHidden(f) end
             end
         end
     end
@@ -874,11 +883,564 @@ end
 -- you zoom) are picked up as they come.
 local SHAPE_FILES = { rect = "Edge", diamond = "Diamond", oval = "Oval" }
 local MEDIA = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\"
-local function EdgeFile()
+
+local Zone = {}
+-- Zone border: the map cut to the outline of a zone, one per zone and capital city. Each zone's is
+-- the land its map paints: all its exploration pieces put together, from the game's own pictures.
+-- The capitals have none: Ironforge and Undercity are cut from their indoor minimap pictures
+-- (placed with TerrainWorldMap's tables, MIT licence: Media\Zone\LICENSE-TerrainWorldMap.txt),
+-- Thunder Bluff and Darnassus from which zone each piece of ground belongs to, and Stormwind and
+-- Orgrimmar come from Waymark's outlines (MIT licence: Media\Zone\LICENSE-Waymark.txt). Each is over
+-- the zone map's whole picture: <uiMapID>.tga sharp, <uiMapID>s.tga with a soft edge inside the
+-- border. The outline is laid over the zone's place on the map shown, so it moves and zooms with the
+-- map: on the game's map, the zone shown; with OpenMap's whole world, the zone you're in. Where
+-- there's no outline, the rectangle is used.
+-- The outlines are a separate download (an addon of their own, loaded only when needed), as their
+-- pictures are much bigger than the rest of Overlay Map.
+Zone.ADDON = "OverlayMap_ZoneBorders"
+Zone.MEDIA = "Interface\\AddOns\\" .. Zone.ADDON .. "\\Zone\\"
+
+-- Where the outlines stand: "loaded", "ready" (installed and on, not loaded yet), "disabled"
+-- (installed, but off in the AddOns list) or "missing" (not installed)
+function Zone.Status()
+    local api = C_AddOns or {}
+    local IsLoaded = api.IsAddOnLoaded or IsAddOnLoaded
+    if IsLoaded and IsLoaded(Zone.ADDON) then return "loaded" end
+    local Info = api.GetAddOnInfo or GetAddOnInfo
+    if not Info then return "missing" end
+    local ok, name, _, _, _, reason = pcall(Info, Zone.ADDON)
+    if not ok or not name or reason == "MISSING" then return "missing" end
+    if reason == "DISABLED" then return "disabled" end
+    return "ready"
+end
+
+function Zone.Installed() return Zone.Status() ~= "missing" end
+
+-- Said in the chat and in the middle of the screen (the chat may be hidden while the map is open)
+function Zone.Tell(msg)
+    Say(msg)
+    if UIErrorsFrame then UIErrorsFrame:AddMessage("Overlay Map: " .. msg, 1, 0.82, 0) end
+end
+
+-- Whether the outlines can be used: loaded the first time they're wanted. (When the download is off
+-- in the AddOns list, choosing Zone Border asks to turn it on and reload: Zone.CheckDownload.)
+function Zone.Available()
+    if Zone.available then return true end
+    if Zone.triedAt and GetTime() - Zone.triedAt < 5 then return false end -- (not tried over and over)
+    Zone.triedAt = GetTime()
+    local api = C_AddOns or {}
+    local Load = api.LoadAddOn or LoadAddOn
+    if Zone.Status() == "ready" and Load then
+        local ok, _, why = pcall(Load, Zone.ADDON)
+        Zone.loadReason = ok and why or "error"
+    end
+    Zone.available = Zone.Status() == "loaded"
+    return Zone.available
+end
+
+Zone.ZONE_MASKS = {
+    [1411] = true, [1412] = true, [1413] = true, [1416] = true, [1417] = true, [1418] = true,
+    [1419] = true, [1420] = true, [1421] = true, [1422] = true, [1423] = true, [1424] = true,
+    [1425] = true, [1426] = true, [1427] = true, [1428] = true, [1429] = true, [1430] = true,
+    [1431] = true, [1432] = true, [1433] = true, [1434] = true, [1435] = true, [1436] = true,
+    [1437] = true, [1438] = true, [1439] = true, [1440] = true, [1441] = true, [1442] = true,
+    [1443] = true, [1444] = true, [1445] = true, [1446] = true, [1447] = true, [1448] = true,
+    [1449] = true, [1450] = true, [1451] = true, [1452] = true, [1453] = true, [1459] = true,
+    [1455] = true, [1456] = true, [1457] = true, [1458] = true, -- (our own: see above)
+    [2482] = true, [2521] = true, [2548] = true, [2652] = true,
+}
+
+
+
+function Zone.WorldRect(id)
+    if id == 947 then return 0, 1, 0, 1 end
+    -- (with OpenMap's whole world, where OpenMap itself places each map: for cities it uses their
+    -- corners' world positions, which on WoW: Forever are tens of yards off the game's own rect)
+    local S = Zone.OpenMapStitched() and _G.OpenMap and _G.OpenMap.MapStitch
+    if S and S.Rect then
+        local okS, sl, sr, st, sb = pcall(S.Rect, id)
+        if okS and sl and sr > sl and sb > st then return sl, sr, st, sb end
+    end
+    local ok, l, r, t, b = pcall(C_Map.GetMapRectOnMap, id, 947)
+    if ok and l and r > l and b > t then return l, r, t, b end
+end
+
+function Zone.OpenMapStitched()
+    local api = OpenMapLoaded() and _G.OpenMapAPI
+    return api and api.IsStitched and api.IsStitched() and true or false
+end
+
+-- The capital cities, with the zone around each, to tell whether the view is on your zone (a city
+-- and its zone count as the same place).
+Zone.CITY_ZONE = { [1455] = 1426, [1456] = 1412, [1457] = 1438, [1458] = 1420 } -- Ironforge, Thunder Bluff, Darnassus, Undercity
+Zone.SAME_PLACE = { [1453] = 1429, [1454] = 1411 } -- Stormwind in Elwynn Forest, Orgrimmar in Durotar
+-- With OpenMap's whole world: a zone is outlined while it fills at least FILL_ON of the view (1: it
+-- just fits; the Whole Map Zoomed Out option, db.zoneWhole), and keeps it until it fills less than
+-- FILL_OFF, 10% less (two values, so it doesn't switch back
+-- and forth at one). Below that (about two to three zones across), the next zone around it is
+-- tried (from a city, the zone it's in), and the whole map shows when none is big enough.
+function Zone.FillOn() return db.zoneWhole or 0.45 end
+function Zone.FillOff() return math.max(0.05, Zone.FillOn() - 0.1) end
+Zone.FIT_MARGIN = 0.9 -- entering a zone: zoomed so it fills 90% of the view
+
+function Zone.Same(id)
+    id = Zone.CITY_ZONE[id] or id
+    return Zone.SAME_PLACE[id] or id
+end
+
+-- The zone at a point of the world (normalized), as deep as the game's maps go
+function Zone.ZoneAt(u, v)
+    local id = 947
+    for _ = 1, 4 do
+        local l, r, t, b = Zone.WorldRect(id)
+        if not l then break end
+        local ok, info = pcall(C_Map.GetMapInfoAtPosition, id, (u - l) / (r - l), (v - t) / (b - t))
+        if not ok or not info or not info.mapID or info.mapID == id then break end
+        id = info.mapID
+    end
+    return id ~= 947 and id or nil
+end
+
+-- The map around one (a city: the zone it's in; a zone: its continent)
+function Zone.Around(id)
+    local near = Zone.CITY_ZONE[id] or Zone.SAME_PLACE[id]
+    if near then return near end
+    local info = C_Map.GetMapInfo(id)
+    return info and info.parentMapID
+end
+
+-- The nearest map with an outline, from one outwards (a dungeon's map or a part of a zone has none)
+function Zone.Outlined(id)
+    for _ = 1, 6 do
+        if not id then return end
+        if Zone.ZONE_MASKS[id] then return id end
+        id = Zone.Around(id)
+    end
+end
+
+-- Where you are: the zone with an outline you're in (inside a capital, the city)
+function Zone.PlayerZone()
+    return Zone.Outlined(C_Map.GetBestMapForUnit("player"))
+end
+
+function Zone.OpenMapModule()
+    local OM = _G.OpenMap
+    if not (OM and OM.GetModule) then return end
+    local ok, mod = pcall(OM.GetModule, OM, "worldmap")
+    return ok and type(mod) == "table" and mod or nil
+end
+
+-- Where each outline's painted part is in its zone map's picture (left, right, top, bottom, 0 to 1):
+-- a zone's map has wide margins around it, so fitting the whole picture left the zone small
+Zone.BOUNDS = {
+    [1411] = { 0.262, 0.727, 0.000, 1.000 },
+    [1412] = { 0.234, 0.730, 0.008, 0.961 },
+    [1413] = { 0.324, 0.664, 0.012, 0.988 },
+    [1416] = { 0.000, 0.953, 0.020, 1.000 },
+    [1417] = { 0.109, 0.840, 0.113, 0.922 },
+    [1418] = { 0.008, 0.957, 0.043, 0.957 },
+    [1419] = { 0.234, 0.723, 0.043, 0.910 },
+    [1420] = { 0.020, 0.961, 0.188, 0.906 },
+    [1421] = { 0.312, 0.812, 0.035, 0.957 },
+    [1422] = { 0.156, 0.855, 0.043, 1.000 },
+    [1423] = { 0.000, 0.992, 0.000, 1.000 },
+    [1424] = { 0.023, 0.965, 0.031, 0.957 },
+    [1425] = { 0.035, 0.840, 0.059, 0.902 },
+    [1426] = { 0.176, 0.898, 0.258, 0.844 },
+    [1427] = { 0.098, 0.859, 0.031, 1.000 },
+    [1428] = { 0.055, 0.996, 0.098, 0.855 },
+    [1429] = { 0.035, 0.980, 0.023, 1.000 },
+    [1430] = { 0.270, 0.672, 0.141, 0.844 },
+    [1431] = { 0.039, 0.977, 0.086, 0.930 },
+    [1432] = { 0.137, 0.887, 0.055, 0.980 },
+    [1433] = { 0.000, 1.000, 0.000, 0.938 },
+    [1434] = { 0.172, 0.547, 0.000, 0.895 },
+    [1435] = { 0.008, 0.992, 0.000, 0.973 },
+    [1436] = { 0.215, 0.785, 0.027, 0.945 },
+    [1437] = { 0.031, 0.934, 0.074, 0.848 },
+    [1438] = { 0.117, 0.730, 0.164, 0.945 },
+    [1439] = { 0.258, 0.680, 0.027, 0.988 },
+    [1440] = { 0.039, 1.000, 0.070, 0.918 },
+    [1441] = { 0.027, 0.914, 0.031, 0.973 },
+    [1442] = { 0.230, 0.895, 0.008, 1.000 },
+    [1443] = { 0.188, 0.938, 0.000, 1.000 },
+    [1444] = { 0.211, 0.957, 0.008, 0.977 },
+    [1445] = { 0.250, 0.836, 0.020, 0.902 },
+    [1446] = { 0.223, 0.766, 0.000, 0.996 },
+    [1447] = { 0.055, 0.918, 0.031, 0.973 },
+    [1448] = { 0.285, 0.699, 0.004, 0.988 },
+    [1449] = { 0.141, 0.852, 0.035, 0.973 },
+    [1450] = { 0.266, 0.777, 0.164, 0.863 },
+    [1451] = { 0.125, 0.852, 0.059, 1.000 },
+    [1452] = { 0.242, 0.742, 0.035, 0.938 },
+    [1453] = { 0.090, 0.902, 0.039, 0.996 },
+    [1455] = { 0.148, 0.887, 0.008, 0.992 },
+    [1456] = { 0.109, 0.879, 0.023, 0.984 },
+    [1457] = { 0.070, 0.887, 0.000, 1.000 },
+    [1458] = { 0.125, 0.898, 0.082, 0.992 },
+    [1459] = { 0.355, 0.613, 0.047, 0.969 },
+    [2482] = { 0.000, 0.980, 0.133, 0.996 },
+    [2521] = { 0.266, 0.859, 0.047, 1.000 },
+    [2548] = { 0.043, 0.938, 0.004, 1.000 },
+    [2652] = { 0.098, 0.898, 0.008, 1.000 },
+}
+
+-- The part of the world the zone's outline takes (its map's rect, without the margins)
+function Zone.Box(id)
+    local l, r, t, b = Zone.WorldRect(id)
+    if not l then return end
+    local k = Zone.BOUNDS[id]
+    if not k then return l, r, t, b end
+    local w, h = r - l, b - t
+    return l + k[1] * w, l + k[2] * w, t + k[3] * h, t + k[4] * h
+end
+
+-- The OpenMap zoom at which a zone's outline just fits the view (OpenMap's own sums: zoom 1 is the
+-- whole world fitting the view)
+function Zone.FitZoom(id)
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    local c = Canvas()
+    local l, r, t, b = Zone.Box(id)
+    if S and S.Size and c and l then
+        local okS, W, H = pcall(S.Size)
+        local cw, ch = c:GetWidth(), c:GetHeight()
+        if okS and type(W) == "number" and type(H) == "number" and W > 0 and H > 0 and cw > 0 and ch > 0 then
+            local z = math.min(cw / ((r - l) * W), ch / ((b - t) * H)) / math.min(cw / W, ch / H)
+            if z > 0 and z < math.huge then return z end
+        end
+    end
+    local om = Zone.OpenMapModule()
+    if not (om and om.FitZoom) then return end
+    local ok, fit = pcall(om.FitZoom, id)
+    if ok and type(fit) == "number" and fit > 0 and fit < math.huge then return fit end
+end
+
+-- How much of the view a zone fills at OpenMap's zoom z (1: it just fits)
+function Zone.Fill(id, z)
+    local fit = Zone.FitZoom(id)
+    if fit then return z / fit end
+    local l, r = Zone.WorldRect(id)
+    return l and (r - l) * z or 1
+end
+
+-- Follow Me with the zone border (OpenMap): the view follows you but doesn't leave your zone's outline.
+-- While the whole zone fits, it stays centred on the zone and doesn't move; zoomed in closer, it
+-- follows you up to the zone's edges.
+function Zone.Clamp(u, v, zoom)
+    if not db.zoneBorder or not Zone.shown then return u, v end
+    -- (on a flight, or out of the outlined zone: just following you, so you don't leave the view)
+    if UnitOnTaxi("player") then return u, v end
+    local mine = Zone.PlayerZone()
+    if not mine or Zone.Same(mine) ~= Zone.Same(Zone.shown) then return u, v end
+    local l, r, t, b = Zone.Box(Zone.shown)
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    local c = Canvas()
+    if not l or not (S and S.Size and c) then return u, v end
+    local okS, W, H = pcall(S.Size)
+    if not zoom then
+        local okV, _, _, z = pcall(_G.OpenMapAPI.GetView)
+        zoom = okV and z
+    end
+    local cw, ch = c:GetWidth(), c:GetHeight()
+    if not okS or type(W) ~= "number" or type(H) ~= "number" or W <= 0 or H <= 0 or type(zoom) ~= "number"
+        or zoom <= 0 or cw <= 0 or ch <= 0 then return u, v end
+    local px = zoom * math.min(cw / W, ch / H) -- (view px per world unit)
+    local hu, hv = cw / px / W / 2, ch / px / H / 2 -- (half the view, in the world's 0..1)
+    if r - l <= 2 * hu then u = (l + r) / 2 else u = math.max(l + hu, math.min(r - hu, u)) end
+    if b - t <= 2 * hv then v = (t + b) / 2 else v = math.max(t + hv, math.min(b - hv, v)) end
+    return u, v
+end
+
+-- The deepest map at a point of OpenMap's world
+function Zone.DeepestAt(u, v)
+    local api = _G.OpenMapAPI
+    if api and api.MapAt then
+        local ok, id = pcall(api.MapAt, u, v)
+        if ok and id then return id end
+    end
+    return Zone.ZoneAt(u, v)
+end
+
+-- The zone to cut to (nil: none fits; Zone.why says why, for /omap debug)
+function Zone.MaskZone()
+    local shown = Map():GetMapID()
+    if not Zone.OpenMapStitched() then
+        if shown and Zone.ZONE_MASKS[shown] then return shown end
+        Zone.why = "no outline for the map shown (" .. tostring(shown) .. ")"
+        return
+    end
+    local ok, u, v, z = pcall(_G.OpenMapAPI.GetView)
+    if not ok or type(u) ~= "number" or type(z) ~= "number" then
+        local zone = Zone.PlayerZone()
+        if not zone then Zone.why = "no outline for where you are" end
+        return zone
+    end
+    local here = Zone.DeepestAt(u, v)
+    -- From the zone in the middle of the view (or where you are), outwards: the first with an
+    -- outline that's big enough in the view
+    local id = db.zoneView and here or C_Map.GetBestMapForUnit("player")
+    local first, zone, tried = id, nil, nil
+    for _ = 1, 6 do
+        if not id then break end
+        if Zone.ZONE_MASKS[id] then
+            local fill = Zone.Fill(id, z)
+            if fill >= ((id == Zone.want) and Zone.FillOff() or Zone.FillOn()) then zone = id break end
+            tried = tried or string.format("%d fills %d%% of the view", id, fill * 100 + 0.5)
+        end
+        id = Zone.Around(id)
+    end
+    if not zone and not tried and db.zoneKeep then
+        -- (nothing with an outline in the middle of the view, like the sea or a gap between zones:
+        -- the zone it had, or yours, while still big enough in view, so the rest of the map stays
+        -- at its opacity instead of the whole map coming back)
+        for _, keep in ipairs({ Zone.want or false, Zone.PlayerZone() or false }) do
+            if keep and Zone.Fill(keep, z) >= Zone.FillOff() then zone = keep break end
+        end
+    end
+    if zone and not db.zoneView and not db.zoneKeep and not Zone.Outlined(here) then
+        Zone.why = "no zone in the middle of the view (" .. tostring(here) .. ")"
+        zone = nil
+    elseif zone and not db.zoneView and Zone.Outlined(here) then
+        -- (your zone only: the whole map while the middle of the view is on another zone; over the
+        -- sea or a gap between zones it stays)
+        local same, at = false, here
+        for _ = 1, 6 do
+            if not at then break end
+            if Zone.Same(at) == Zone.Same(zone) then same = true break end
+            at = Zone.Around(at)
+        end
+        if not same then
+            Zone.why = "looking at another zone (" .. tostring(here) .. ")"
+            zone = nil
+        end
+    elseif not zone then
+        Zone.why = tried and ("zoomed out (" .. tried .. ")")
+            or ("no outline for " .. (db.zoneView and "the middle of the view" or "where you are")
+            .. " (" .. tostring(first) .. ")")
+    end
+    return zone
+end
+
+-- Lays the anchor over the zone's place on the map shown (in the map's own units, so it pans and
+-- zooms with it). False when the zone can't be placed there.
+function Zone.RectOnHost(zone)
+    local host = Map():GetMapID()
+    if not host then return end
+    if zone == host then return 0, 1, 0, 1 end
+    local zl, zr, zt, zb = Zone.WorldRect(zone)
+    local hl, hr, ht, hb = Zone.WorldRect(host)
+    if not zl or not hl then return end
+    return (zl - hl) / (hr - hl), (zr - hl) / (hr - hl), (zt - ht) / (hb - ht), (zb - ht) / (hb - ht)
+end
+
+function Zone.PlaceZoneAnchor(zone)
+    local content = Canvas().Child
+    if not content then return false end
+    local l, r, t, b = Zone.RectOnHost(zone)
+    if not l then return false end
+    local cw, ch = content:GetSize()
+    if not cw or cw == 0 then return false end
+    if not Zone.zoneAnchor then
+        Zone.zoneAnchor = CreateFrame("Frame", nil, content)
+        Zone.zoneAnchor.overlayMapOwn = true
+    end
+    if Zone.zoneAnchor:GetParent() ~= content then Zone.zoneAnchor:SetParent(content) end
+    local key = string.format("%.5f %.5f %.5f %.5f %.1f %.1f", l, r, t, b, cw, ch)
+    if Zone.zoneAnchor.placed ~= key then
+        Zone.zoneAnchor.placed = key
+        Zone.zoneAnchor:ClearAllPoints()
+        Zone.zoneAnchor:SetPoint("TOPLEFT", content, "TOPLEFT", l * cw, -t * ch)
+        Zone.zoneAnchor:SetSize((r - l) * cw, (b - t) * ch)
+    end
+    return true
+end
+
+-- Changing outline (another zone, or the whole map) goes through the rest of the map's opacity: up
+-- to 90% (another zone) or 100% (no cut), the new outline, and down to its opacity again, in steps a quarter of a second
+-- each way. Zone.want: the zone wanted; Zone.shown: the one laid; Zone.level: the rest of the map's
+-- opacity now (100: no cut); Zone.zoneNow: the zone cut to (nil while at 100). The steps past 60%
+-- have smaller pictures (<id>d70, d80, d90), only seen for a moment.
+-- A step only comes once its picture is loaded (a mask whose picture isn't loaded yet hides the whole
+-- map for a moment): each zone's pictures are loaded ahead on hidden textures as soon as it's wanted,
+-- for the last few zones. And a new zone is only taken once it has stayed the one wanted for SETTLE
+-- seconds, so moving along a border doesn't switch back and forth.
+Zone.STEPS = { 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100 }
+Zone.STEP_TIME = 0.025
+Zone.SETTLE = 0.25
+Zone.KEEP_LOADED = 4
+
+function Zone.FileFor(zone, level)
+    return Zone.MEDIA .. zone .. ((level > 0 and level < 100) and ("d" .. level) or "")
+        .. (db.zoneSoft and "s" or "")
+end
+
+Zone.loaded, Zone.loadOrder, Zone.spare = {}, {}, {}
+function Zone.Preload(zone)
+    local key = zone .. (db.zoneSoft and "s" or "")
+    if Zone.loaded[key] then return Zone.loaded[key] end
+    if not Zone.holder then
+        Zone.holder = CreateFrame("Frame", nil, UIParent)
+        Zone.holder:SetSize(1, 1)
+        Zone.holder:SetPoint("BOTTOMLEFT")
+    end
+    if #Zone.loadOrder >= Zone.KEEP_LOADED then Zone.Unload(Zone.loadOrder[1]) end
+    local set = { at = GetTime() }
+    for _, level in ipairs(Zone.STEPS) do
+        if level < 100 then
+            local t = table.remove(Zone.spare) or Zone.holder:CreateTexture(nil, "BACKGROUND")
+            t:ClearAllPoints()
+            t:SetPoint("BOTTOMLEFT")
+            t:SetSize(1, 1)
+            t:SetAlpha(0)
+            t:SetTexture(Zone.FileFor(zone, level))
+            t:Show()
+            set[level] = t
+        end
+    end
+    Zone.loaded[key] = set
+    Zone.loadOrder[#Zone.loadOrder + 1] = key
+    return set
+end
+
+function Zone.Unload(key)
+    local set = Zone.loaded[key]
+    Zone.loaded[key] = nil
+    for i, k in ipairs(Zone.loadOrder) do
+        if k == key then table.remove(Zone.loadOrder, i) break end
+    end
+    if not set then return end
+    for level, t in pairs(set) do
+        if type(level) == "number" then
+            t:SetTexture(nil)
+            t:Hide()
+            Zone.spare[#Zone.spare + 1] = t
+        end
+    end
+end
+
+-- Whether a zone's picture at a level is loaded (no picture at 100: nothing to wait for)
+function Zone.Ready(zone, level)
+    if not zone or level >= 100 then return true end
+    local set = Zone.Preload(zone)
+    local t = set[level]
+    if t and t.IsObjectLoaded then
+        local ok, done = pcall(t.IsObjectLoaded, t)
+        if ok and type(done) == "boolean" then return done end
+    end
+    return GetTime() - set.at > 0.15 -- (a client that can't tell: a moment after asking for it)
+end
+
+-- The rest of the map's opacity set (to the nearest one there's a picture for: 5% steps to 60%)
+function Zone.Target()
+    local level = math.floor((db.zoneDim or 0) * 100 / 5 + 0.5) * 5
+    return math.max(0, math.min(60, level))
+end
+
+function Zone.DimSuffix()
+    local level = Zone.level or Zone.Target()
+    return (level > 0 and level < 100) and ("d" .. level) or ""
+end
+
+function Zone.NextStep(level, target)
+    local steps = Zone.STEPS
+    if target > level then
+        for i = 1, #steps do if steps[i] > level then return math.min(steps[i], target) end end
+    else
+        for i = #steps, 1, -1 do if steps[i] < level then return math.max(steps[i], target) end end
+    end
+    return target
+end
+
+function Zone.Goal()
+    -- (from one zone to another, the change happens at 90%, so the whole map doesn't show for a
+    -- moment in between; to or from the whole map, at 100%)
+    if Zone.want ~= Zone.shown then return (Zone.want and Zone.shown) and 90 or 100 end
+    return Zone.shown and Zone.Target() or 100
+end
+
+function Zone.SetNow()
+    Zone.zoneNow = (Zone.shown and Zone.level and Zone.level < 100) and Zone.shown or nil
+end
+
+function Zone.Reset()
+    Zone.want, Zone.shown, Zone.level, Zone.zoneNow, Zone.pending = nil, nil, nil, nil, nil
+    if Zone.anim then Zone.anim:Hide() end
+    while Zone.loadOrder[1] do Zone.Unload(Zone.loadOrder[1]) end
+end
+
+-- Which zone the outline is for (worked out each time the edges are laid)
+function Zone.UpdateZone()
+    Zone.why = nil
+    if not db.zoneBorder then Zone.Reset() return end
+    if not Zone.Available() then
+        Zone.Reset()
+        Zone.why = "the Overlay Map: Zone Borders download isn't installed or enabled"
+        return
+    end
+    local want = Zone.MaskZone()
+    if want and want ~= Zone.want and not Zone.RectOnHost(want) then
+        -- (the game's map changes underneath while OpenMap zooms, and for a moment the zone can't
+        -- be placed on it: the outline stays as it was)
+        Zone.why = "zone " .. want .. " couldn't be placed on the map shown (" .. tostring(Map():GetMapID()) .. ")"
+        want = Zone.want
+    end
+    if want then Zone.Preload(want) end
+    if Zone.level == nil then -- (the map just opened, or the shape just chosen: straight there)
+        Zone.want, Zone.pending = want, nil
+        Zone.shown, Zone.level = want, want and Zone.Target() or 100
+    elseif (want or false) == (Zone.want or false) then
+        Zone.pending = nil
+    else
+        -- (taken once it has stayed the one wanted for a moment)
+        if Zone.pending ~= (want or false) then Zone.pending, Zone.pendingAt = want or false, GetTime() end
+        if GetTime() - Zone.pendingAt >= Zone.SETTLE then Zone.want, Zone.pending = want, nil end
+    end
+    if Zone.shown then Zone.PlaceZoneAnchor(Zone.shown) end -- (if it can't, it stays where it was)
+    Zone.SetNow()
+    if Zone.level ~= Zone.Goal() or Zone.want ~= Zone.shown or Zone.pending ~= nil then Zone.anim:Show() end
+end
+
+Zone.anim = CreateFrame("Frame")
+Zone.anim:Hide()
+Zone.anim.acc = 0
+Zone.anim:SetScript("OnUpdate", function(self, elapsed)
+    if not compact or Zone.level == nil then self:Hide() return end
+    self.acc = self.acc + elapsed
+    if self.acc < Zone.STEP_TIME then return end
+    self.acc = 0
+    if Zone.pending ~= nil and GetTime() - Zone.pendingAt >= Zone.SETTLE then
+        Zone.UpdateZone() -- (still the one wanted: taken now)
+    end
+    local goal = Zone.Goal()
+    if Zone.level ~= goal then
+        local nextLevel = Zone.NextStep(Zone.level, goal)
+        if not Zone.Ready(Zone.shown, nextLevel) then return end -- (its picture is still loading)
+        Zone.level = nextLevel
+    elseif Zone.want ~= Zone.shown then
+        if not Zone.Ready(Zone.want, Zone.level) then return end
+        Zone.shown = Zone.want -- (the new outline, from where it goes down again)
+        if Zone.shown then Zone.PlaceZoneAnchor(Zone.shown) end
+    elseif Zone.pending == nil then
+        self:Hide()
+        return
+    else
+        return
+    end
+    Zone.SetNow()
+    if Zone.Redraw then Zone.Redraw() end
+end)
+
+-- Two masks on the map: the shape (the torn parchment's edge, or the soft edges' shape; none for a
+-- plain rectangle) over the whole map area, and the zone's outline over the zone's place.
+local function ShapeFile()
     -- (the torn parchment's edge is always the same; soft edges come in four widths, and with
     -- them off a diamond or an oval is cut sharp)
     if db.style == "torn" then return MEDIA .. "Torn" end
     return MEDIA .. (SHAPE_FILES[db.shape] or "Edge") .. db.edge
+end
+
+local function ZoneFile()
+    return Zone.MEDIA .. Zone.zoneNow .. Zone.DimSuffix() .. (db.zoneSoft and "s" or "")
 end
 
 -- The old map look: torn edges, with a burnt brown rim drawn along them, over the map's picture
@@ -904,79 +1466,185 @@ end
 local function HideRim()
     if rim then rim:Hide() end
 end
-local masks = {}                                         -- frame -> its mask
-local maskedTex = setmetatable({}, { __mode = "k" })     -- picture -> the mask on it
+local masks = { shape = {}, zone = {} }                  -- kind -> frame -> its mask
+local maskedTex = {                                      -- kind -> picture -> the mask on it
+    shape = setmetatable({}, { __mode = "k" }),
+    zone = setmetatable({}, { __mode = "k" }),
+}
 
-local function MaskFor(frame)
-    local m = masks[frame]
+local function MaskFor(frame, kind)
+    local m = masks[kind][frame]
     if not m then
         local ok, made = pcall(frame.CreateMaskTexture, frame)
         if not ok or not made then return end
         m = made
-        masks[frame] = m
+        masks[kind][frame] = m
     end
-    local file = EdgeFile()
+    local file = kind == "zone" and ZoneFile() or ShapeFile()
     if m.file ~= file then
-        m:SetTexture(file, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        -- (past its picture a mask hides everything; the dimmed zone outlines repeat their outer
+        -- pixels instead, so the rest of the map stays faded, not hidden)
+        local wrap = (kind == "zone" and Zone.DimSuffix() ~= "") and "CLAMP" or "CLAMPTOBLACKADDITIVE"
+        m:SetTexture(file, wrap, wrap)
         m.file = file
     end
-    if m.syncedTo ~= Canvas() then
+    local over = kind == "zone" and Zone.zoneAnchor or Canvas()
+    if m.syncedTo ~= over then
         m:ClearAllPoints()
-        m:SetAllPoints(Canvas())
-        m.syncedTo = Canvas()
+        m:SetAllPoints(over)
+        m.syncedTo = over
     end
     if not m:IsShown() then m:Show() end
     return m
 end
 
-local function MaskTree(frame, depth)
-    if depth > 5 or frame:IsForbidden() then return end
-    local m
+-- A picture only takes a few masks, and OpenMap's already carry up to three of their own: one more
+-- may not fit. Whether it took is told by the count going up (or, on a client without it, by no error).
+local function AddMask(r, m)
+    local before = r.GetNumMaskTextures and r:GetNumMaskTextures()
+    if not pcall(r.AddMaskTexture, r, m) then return false end
+    if before and r:GetNumMaskTextures() <= before then return false end
+    return true
+end
+
+-- One frame's pictures: each gets the mask (once)
+local function MaskRegions(frame, kind, m)
+    local on = maskedTex[kind]
     for _, r in ipairs({ frame:GetRegions() }) do
         if r:GetObjectType() == "Texture" then
-            m = m or MaskFor(frame)
-            if not m then break end
-            local old = maskedTex[r]
+            local old = on[r]
             if old ~= m then
                 if old then pcall(r.RemoveMaskTexture, r, old) end
-                if pcall(r.AddMaskTexture, r, m) then maskedTex[r] = m end
+                on[r] = nil
+                if AddMask(r, m) then
+                    on[r] = m
+                elseif kind == "zone" and maskedTex.shape[r] then
+                    -- (no room for the zone's outline: it matters more than the soft edges, which
+                    -- make room for it and go back on if they still fit)
+                    local edge = maskedTex.shape[r]
+                    pcall(r.RemoveMaskTexture, r, edge)
+                    maskedTex.shape[r] = nil
+                    Zone.walked.shape[frame] = nil
+                    if AddMask(r, m) then on[r] = m end
+                    if AddMask(r, edge) then maskedTex.shape[r] = edge end
+                end
             end
         end
     end
-    for _, child in ipairs({ frame:GetChildren() }) do MaskTree(child, depth + 1) end
+end
+
+-- Going through every picture again each time was slow (OpenMap's map is thousands of them): a
+-- frame's pictures are only gone through when it has a different number than last time (its mask
+-- itself follows any change of picture or place without that), and its list of children is kept
+-- until their number changes.
+Zone.walked = { shape = setmetatable({}, { __mode = "k" }), zone = setmetatable({}, { __mode = "k" }) }
+Zone.kids = setmetatable({}, { __mode = "k" })
+function Zone.Children(frame)
+    local n = frame:GetNumChildren()
+    local c = Zone.kids[frame]
+    if not c or c.n ~= n then
+        c = { frame:GetChildren() }
+        c.n = n
+        Zone.kids[frame] = c
+    end
+    return c
+end
+Zone.ForgetWalked = function() wipe(Zone.kids) end -- (now and then, for children swapped one for one)
+
+local function MaskTree(frame, depth, kind)
+    if depth > 5 or frame:IsForbidden() then return end
+    local count = frame:GetNumRegions()
+    if count > 0 then
+        local m = MaskFor(frame, kind)
+        if m and Zone.walked[kind][frame] ~= count then
+            Zone.walked[kind][frame] = count
+            MaskRegions(frame, kind, m)
+        end
+    end
+    local c = Zone.Children(frame)
+    for i = 1, #c do MaskTree(c[i], depth + 1, kind) end
+end
+
+local function UnmaskKind(kind)
+    for tex, m in pairs(maskedTex[kind]) do pcall(tex.RemoveMaskTexture, tex, m) end
+    wipe(maskedTex[kind])
+    wipe(Zone.walked[kind])
+    -- (the soft edges may have made room for the zone's outline on some pictures: back on them)
+    if kind == "zone" then wipe(Zone.walked.shape) end
+    for _, m in pairs(masks[kind]) do m:Hide() end
 end
 
 local function Unmask()
     HideRim()
-    for tex, m in pairs(maskedTex) do pcall(tex.RemoveMaskTexture, tex, m) end
-    wipe(maskedTex)
-    for _, m in pairs(masks) do m:Hide() end
+    UnmaskKind("shape")
+    UnmaskKind("zone")
 end
 
-local function ApplyEdges()
-    local torn = db.style == "torn"
-    -- (soft edges off with a rectangle: nothing to do; with a diamond or an oval: a sharp cut)
-    local plain = (db.edge or 0) < 1 and (db.shape or "rect") == "rect"
-    if not compact or (not torn and plain) then
-        if next(maskedTex) then Unmask() end
-        HideRim()
+-- Whether the map needs a shape mask (a plain rectangle without soft edges doesn't)
+local function WantShapeMask()
+    return db.style == "torn" or (db.edge or 0) >= 1 or (db.shape or "rect") ~= "rect"
+end
+
+Zone.cost = { n = 0, ms = 0, since = 0 } -- (for /omap debug: how often the edges are laid, and the time)
+local function ApplyEdges(keepZone)
+    local t0 = debugprofilestop()
+    local cost = Zone.cost
+    if GetTime() - cost.since > 10 then cost.n, cost.ms, cost.since = 0, 0, GetTime() end
+    cost.n = cost.n + 1
+    Zone.ApplyEdgesNow(keepZone)
+    cost.ms = cost.ms + debugprofilestop() - t0
+end
+function Zone.ApplyEdgesNow(keepZone)
+    if compact and not keepZone then Zone.UpdateZone() end
+    if not compact then Unmask() return end
+    if db.style == "torn" then ShowRim() else HideRim() end
+    local content = Canvas().Child
+    for _, kind in ipairs({ "zone", "shape" }) do -- (the zone's outline first: see MaskTree)
+        local on
+        if kind == "shape" then on = WantShapeMask() else on = Zone.zoneNow ~= nil end
+        if on then
+            if content then MaskTree(content, 0, kind) end
+            if layer and layer:IsShown() then MaskTree(layer, 0, kind) end
+            if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0, kind) end
+        elseif next(maskedTex[kind]) then
+            UnmaskKind(kind)
+        end
+    end
+end
+
+Zone.Redraw = function() ApplyEdges(true) end
+
+-- Laying the edges walks every picture on the map (OpenMap's are thousands), so it's done at most
+-- every EDGE_GAP seconds: the map moving (Follow Me, dragging, zooming) asks for it every frame.
+local edgesPending, edgesLast = false, 0
+local EDGE_GAP = 0.25
+local function QueueEdges()
+    if edgesPending or not compact or (not WantShapeMask() and not db.zoneBorder) then return end
+    edgesPending = true
+    C_Timer.After(math.max(0, edgesLast + EDGE_GAP - GetTime()), function()
+        edgesPending = false
+        edgesLast = GetTime()
+        if compact then ApplyEdges() end
+    end)
+end
+
+-- OpenMap's view moved: only which zone is outlined is worked out again (ten times a second at most),
+-- and the pictures are only gone through when that changes; the outline itself moves with the map.
+function Zone.ViewMoved()
+    if not compact or not db.zoneBorder or Zone.viewQueued then return end
+    local wait = (Zone.viewAt or 0) + 0.1 - GetTime()
+    if wait > 0 then
+        Zone.viewQueued = true
+        C_Timer.After(wait, function()
+            Zone.viewQueued = false
+            Zone.ViewMoved()
+        end)
         return
     end
-    if torn then ShowRim() else HideRim() end
-    local content = Canvas().Child
-    if content then MaskTree(content, 0) end
-    if layer and layer:IsShown() then MaskTree(layer, 0) end
-    if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0) end
-end
-
-local edgesPending = false
-local function QueueEdges()
-    if edgesPending or not compact or (db.edge or 0) < 1 then return end
-    edgesPending = true
-    C_Timer.After(0, function()
-        edgesPending = false
-        ApplyEdges()
-    end)
+    Zone.viewAt = GetTime()
+    local before, level = Zone.zoneNow, Zone.level
+    Zone.UpdateZone()
+    if Zone.zoneNow ~= before or Zone.level ~= level then Zone.Redraw() end
 end
 
 -- While the map is open, a few times a second: new markers get their opacity, and anything the
@@ -1037,7 +1705,10 @@ local function Follow(force)
         if not force and lastX and math.abs(x - lastX) < 1e-4 and math.abs(y - lastY) < 1e-4 then return end
         lastX, lastY = x, y
         local u, v = api.WorldFromMap(best, x, y)
-        if u then pcall(api.ShowWorld, u, v) end
+        -- (while the map zooms to fit a new zone, towards that zoom, not the one it's passing)
+        local zoom = Zone.fitUntil and GetTime() < Zone.fitUntil and Zone.fitZoom or nil
+        if u then u, v = Zone.Clamp(u, v, zoom) end
+        if u then pcall(api.ShowWorld, u, v, zoom) end
         return
     end
     local map, c = Map(), Canvas()
@@ -1048,7 +1719,45 @@ local function Follow(force)
     pcall(c.SetPanTarget, c, x, y)
 end
 
-local edgeAcc = 0
+-- Entering a new zone (with the zone border): the map zoomed so the zone fits, centred on it. With OpenMap a glide (instant as the map opens); without it, the game's
+-- map shows the zone, all of it.
+function Zone.Fit(zone, instant)
+    if Zone.OpenMapStitched() then
+        local fit = Zone.FitZoom(zone)
+        local l, r, t, b = Zone.Box(zone)
+        local api = _G.OpenMapAPI
+        if not fit or not l then return end
+        local zoom = fit * Zone.FIT_MARGIN
+        local u, v = (l + r) / 2, (t + b) / 2
+        Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + 1
+        local om = Zone.OpenMapModule()
+        if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
+        if api.ShowWorld then pcall(api.ShowWorld, u, v, zoom) end
+        return
+    end
+    local map, c = Map(), Canvas()
+    if map:GetMapID() ~= zone then
+        pcall(map.SetMapID, map, zone) -- (it opens zoomed out; Fill lays it for the map's shape)
+    elseif type(c.zoomLevels) == "table" and c.zoomLevels[1] and c.InstantPanAndZoom then
+        pcall(c.InstantPanAndZoom, c, c.zoomLevels[1].scale, 0.5, 0.5, true)
+        C_Timer.After(0, Fill)
+    end
+end
+
+-- Whether you've entered a new zone since the map last looked (the first time, only noted)
+function Zone.CheckFit(instant)
+    -- (on a flight, not each zone you fly over: the one you land in, once you land)
+    if UnitOnTaxi("player") then return end
+    local zone = Zone.PlayerZone()
+    if not zone or zone == Zone.fittedFor then return end
+    local first = Zone.fittedFor == nil
+    Zone.fittedFor = zone
+    if first or not db.zoneFit or not db.zoneBorder or not Zone.Available() then return end
+    Zone.Fit(zone, instant)
+end
+
+local edgeSweeps = 0
+local Watch -- (below)
 local ApplyClickThrough, ApplyOnlyMe, ApplyMarkerSize, ApplyArrow -- (further down)
 watcher:SetScript("OnUpdate", function(self, elapsed)
     if not compact then self:Hide(); return end
@@ -1064,27 +1773,45 @@ watcher:SetScript("OnUpdate", function(self, elapsed)
     watchAcc = watchAcc + elapsed
     if watchAcc < 0.2 then return end
     watchAcc = 0
+    local t0 = debugprofilestop()
+    Watch()
+    local cost = Zone.watchCost
+    if GetTime() - cost.since > 10 then cost.n, cost.ms, cost.since = 0, 0, GetTime() end
+    cost.n, cost.ms = cost.n + 1, cost.ms + debugprofilestop() - t0
+end)
+
+-- Five times a second while the map is open. What's only a safety net (something put back by the
+-- game or another addon) is done once a second; new markers get theirs from the lists kept of each
+-- frame's children (Zone.Children), so going through OpenMap's icons costs little.
+Zone.watchCost = { n = 0, ms = 0, since = 0 }
+local slowAcc = 0
+Watch = function()
+    slowAcc = slowAcc + 1
+    local slow = slowAcc >= 5
+    if slow then slowAcc = 0 end
     for obj in pairs(hidden) do
         if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
     end
+    if not settling then Zone.CheckFit() end
     if not reshaping and math.abs(Canvas():GetScale() - WantScale()) > 0.001 then ApplySize() end -- (also a new screen size)
     -- (a fade left half-way, which nothing is finishing: the map shown again)
     if not reshaping and not settling and transition < 1 and not fader:IsShown() then FadeTo(1, 0.2) end
-    CoverScreen() -- (in case the game's window layout moved it back)
     ApplyOpacity()
-    HideExtras()
-    if db.hideMinimap then HideMinimap() end
-    if db.clickThrough then ApplyClickThrough() end -- (in case something gave the mouse back)
+    if db.clickThrough then ApplyClickThrough() end -- (new markers, or something gave the mouse back)
     ApplyOnlyMe() -- (new markers)
     ApplyMarkerSize() -- (new markers)
+    if not slow then return end
+    CoverScreen() -- (in case the game's window layout moved it back)
+    HideExtras()
+    if db.hideMinimap then HideMinimap() end
     ApplyArrow()
     if mapButton and mapButton:IsShown() then PlaceMapButton() end -- (the map grew past the screen)
-    edgeAcc = edgeAcc + 1
-    if edgeAcc >= 5 then -- (once a second, for anything the events missed)
-        edgeAcc = 0
-        ApplyEdges()
-    end
-end)
+    -- (once a second, for anything the events missed; every five, the lists of children read again,
+    -- for any swapped one for one)
+    edgeSweeps = edgeSweeps + 1
+    if edgeSweeps % 5 == 0 then Zone.ForgetWalked() end
+    ApplyEdges()
+end
 
 -- Click-through: clicks go through the map to the world behind it (right-click turning, left
 -- clicks), while the map still notices the mouse moving over it, so its markers show their names
@@ -1126,7 +1853,7 @@ local function ClickableMarkers()
         if f:IsForbidden() then return end
         if f:IsMouseClickEnabled() then list[#list + 1] = f end
         if depth > 0 then
-            for _, child in ipairs({ f:GetChildren() }) do Walk(child, depth - 1) end
+            for _, child in ipairs(Zone.Children(f)) do Walk(child, depth - 1) end
         end
     end
     for _, pool in pairs(Map().pinPools or {}) do
@@ -1135,7 +1862,7 @@ local function ClickableMarkers()
         end
     end
     for f in pairs(iconLayers) do
-        for _, child in ipairs({ f:GetChildren() }) do Walk(child, 2) end
+        for _, child in ipairs(Zone.Children(f)) do Walk(child, 2) end
     end
     return list
 end
@@ -1245,7 +1972,7 @@ end
 local function HideMarkerTree(f, depth)
     HideMarker(f)
     if depth > 0 then
-        for _, child in ipairs({ f:GetChildren() }) do HideMarkerTree(child, depth - 1) end
+        for _, child in ipairs(Zone.Children(f)) do HideMarkerTree(child, depth - 1) end
     end
 end
 
@@ -1312,7 +2039,7 @@ ApplyOnlyMe = function()
         end
     end
     for f in pairs(iconLayers) do
-        for _, child in ipairs({ f:GetChildren() }) do
+        for _, child in ipairs(Zone.Children(f)) do
             if not IsArrow(child) then HideMarkerTree(child, 2) end
         end
     end
@@ -1404,7 +2131,7 @@ ApplyMarkerSize = function()
     -- OpenMap's icons: its layer, its sets, their cells, the icons (each with its picture and the
     -- spot it's anchored to)
     local function Walk(f, depth)
-        for _, child in ipairs({ f:GetChildren() }) do
+        for _, child in ipairs(Zone.Children(f)) do
             if child.Icon and child.anchor then
                 SizeOpenMapIcon(child, k)
             elseif depth > 0 then
@@ -1419,23 +2146,24 @@ ApplyMarkerSize = function()
     end
 end
 
+local Arrow = {}
 -- My arrow: its own size and opacity, when chosen (My Arrow's Own Size). With OpenMap's map it's
 -- OpenMap's own arrow (a picture on its icon layer); otherwise the game's, drawn by the group
 -- members' marker, whose size for the player is set on it (its opacity is the whole marker's, so
 -- the party's dots take it too). Put back as it was on close.
-local arrowBase = setmetatable({}, { __mode = "k" })    -- arrow picture or marker -> its own size
-local arrowHooked = setmetatable({}, { __mode = "k" })
-local arrowApplied = setmetatable({}, { __mode = "k" })   -- marker -> the size factor last set on it
-local arrowSetting = false
+Arrow.arrowBase = setmetatable({}, { __mode = "k" })    -- arrow picture or marker -> its own size
+Arrow.arrowHooked = setmetatable({}, { __mode = "k" })
+Arrow.arrowApplied = setmetatable({}, { __mode = "k" })   -- marker -> the size factor last set on it
+Arrow.arrowSetting = false
 
-local function ArrowWant()
+function Arrow.ArrowWant()
     if compact and db.arrowCustom then return db.arrowSize or 1, db.arrowOpacity or 1 end
     return 1, 1
 end
 
-local function OpenMapArrow()
+function Arrow.OpenMapArrow()
     for f in pairs(iconLayers) do
-        for _, child in ipairs({ f:GetChildren() }) do
+        for _, child in ipairs(Zone.Children(f)) do
             for _, r in ipairs({ child:GetRegions() }) do
                 if r:GetObjectType() == "Texture" then
                     local path = r.GetTextureFilePath and r:GetTextureFilePath() or r:GetTexture()
@@ -1447,44 +2175,44 @@ local function OpenMapArrow()
 end
 
 ApplyArrow = function()
-    local k, a = ArrowWant()
-    local tex = OpenMapArrow()
+    local k, a = Arrow.ArrowWant()
+    local tex = Arrow.OpenMapArrow()
     if tex then
-        if not arrowBase[tex] then
-            if k == 1 and a == 1 then tex = nil else arrowBase[tex] = tex:GetWidth() end
+        if not Arrow.arrowBase[tex] then
+            if k == 1 and a == 1 then tex = nil else Arrow.arrowBase[tex] = tex:GetWidth() end
         end
         if tex then
-            local want = arrowBase[tex] * k
+            local want = Arrow.arrowBase[tex] * k
             if math.abs(tex:GetWidth() - want) > 0.01 then tex:SetSize(want, want) end
             if math.abs(tex:GetAlpha() - a) > 0.001 then tex:SetAlpha(a) end
-            if k == 1 and a == 1 then arrowBase[tex] = nil end
+            if k == 1 and a == 1 then Arrow.arrowBase[tex] = nil end
         end
     end
     local pool = Map().pinPools and Map().pinPools.GroupMembersPinTemplate
     if not (pool and pool.EnumerateActive) then return end
     for pin in pool:EnumerateActive() do
         if pin.SetPinSize then
-            if not arrowHooked[pin] then
-                arrowHooked[pin] = true
+            if not Arrow.arrowHooked[pin] then
+                Arrow.arrowHooked[pin] = true
                 -- (the game sets the player's size again now and then: noted as its own, ours on top)
                 hooksecurefunc(pin, "SetPinSize", function(self, unit, size)
-                    if arrowSetting or unit ~= "player" or type(size) ~= "number" then return end
-                    arrowBase[self] = size
-                    local kk = ArrowWant()
+                    if Arrow.arrowSetting or unit ~= "player" or type(size) ~= "number" then return end
+                    Arrow.arrowBase[self] = size
+                    local kk = Arrow.ArrowWant()
                     if kk ~= 1 then
-                        arrowSetting = true
+                        Arrow.arrowSetting = true
                         pcall(self.SetPinSize, self, "player", size * kk)
-                        arrowSetting = false
+                        Arrow.arrowSetting = false
                     end
                 end)
                 if pin.UpdateAppearanceData then pcall(pin.UpdateAppearanceData, pin) end
             end
-            local base = arrowBase[pin]
-            if base and arrowApplied[pin] ~= k then
-                arrowApplied[pin] = k
-                arrowSetting = true
+            local base = Arrow.arrowBase[pin]
+            if base and Arrow.arrowApplied[pin] ~= k then
+                Arrow.arrowApplied[pin] = k
+                Arrow.arrowSetting = true
                 pcall(pin.SetPinSize, pin, "player", base * k)
-                arrowSetting = false
+                Arrow.arrowSetting = false
             end
         end
         if math.abs(pin:GetAlpha() - a) > 0.001 then pin:SetAlpha(a) end
@@ -1494,6 +2222,7 @@ end
 local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
+    Zone.CheckDownload() -- (Zone Border chosen without its download ready: asked, or told, at once)
     if not compact then return end
     local map = Map()
     ApplyMarkerSize()
@@ -1577,6 +2306,7 @@ local function Restore()
     StopFade()
     SaveZoom()
     compact = false
+    Zone.Reset()
     local map = Map()
     RevealAll()
     ShowMinimap()
@@ -1642,6 +2372,12 @@ local function Open()
             if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
         end
         RestoreZoom()
+        if db.zoneBorder and db.zoneFitOpen and Zone.PlayerZone() then
+            Zone.fittedFor = Zone.PlayerZone()
+            Zone.Fit(Zone.fittedFor, true) -- (every time: fitted to your zone)
+        else
+            Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
+        end
         settling = false
         ApplyLook()
         -- The map and other addons finish setting up their frames' mouse while it opens; the
@@ -1679,6 +2415,13 @@ local function HookMap()
                               "HandleUserActionOpenSelf", "HandleUserActionOpenQuestLog" }) do
         if map[method] then hooksecurefunc(map, method, Restore) end
     end
+    -- The map's picture resized (another map under OpenMap's view): the outline laid again at once
+    local child = map.ScrollContainer and map.ScrollContainer.Child
+    if child then
+        child:HookScript("OnSizeChanged", function()
+            if compact and Zone.shown then Zone.PlaceZoneAnchor(Zone.shown) end
+        end)
+    end
     -- Zooming the map: the markers' layer zooms with it right away.
     if map.OnCanvasScaleChanged then
         if map.ScrollContainer and map.ScrollContainer.CreateZoomLevels then
@@ -1705,7 +2448,13 @@ local function HookMap()
     -- Another zone shown while Overlay Map shows the map: fill the shape again.
     if map.OnMapChanged then
         hooksecurefunc(map, "OnMapChanged", function()
-            if compact then C_Timer.After(0, Fill) end
+            if compact then
+                C_Timer.After(0, Fill)
+                -- (a zone border follows the map shown: at once, as OpenMap changes the map under
+                -- its view while it moves, or the outline is a frame behind, out of place)
+                if db.zoneBorder then ApplyEdges() end
+                QueueEdges()
+            end
         end)
     end
     -- Other windows opening move the map back to its usual spot; keep it where it was put.
@@ -1822,12 +2571,62 @@ end
 -- that mode. The other mode's values wait in the saved settings (beforeOverlay: the normal map's,
 -- while Overlay Mode is on; overlaySet: Overlay Mode's, while it's off).
 local OVERLAY_KEYS = { "opacity", "pinOpacity", "markerSize", "arrowCustom", "arrowSize", "arrowOpacity", "style",
-    "edge", "shape", "clickThrough", "noFade" }
+    "edge", "shape", "zoneBorder", "zoneSoft", "zoneDim", "clickThrough", "noFade" }
 -- Overlay Mode the first time it's turned on: see-through, solid markers, large soft edges,
 -- click-through (the rest as the normal map has them)
 local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, noFade = true }
 
 local RefreshPanel -- (further down)
+
+-- Zone Border on, but its download not ready: off in the AddOns list, a window asks to turn it on
+-- and reload (Zone Border stays off unless that's accepted); not installed, it's turned off and
+-- said where to get it. Asked once a session.
+StaticPopupDialogs.OVERLAYMAP_ZONEBORDERS = {
+    text = "Zone Border needs \"Overlay Map: Zone Borders\", which is turned off in your AddOns list.\n\n"
+        .. "Turn it on and reload the interface?",
+    button1 = "Turn On and Reload",
+    button2 = CANCEL or "Cancel",
+    OnAccept = function()
+        -- (as the AddOns list does: turned on, for this character and for all, then saved, which
+        -- the reload alone doesn't do)
+        local api = C_AddOns or {}
+        local Enable = api.EnableAddOn or EnableAddOn
+        if Enable then
+            pcall(Enable, Zone.ADDON, UnitName("player"))
+            pcall(Enable, Zone.ADDON)
+        end
+        local Save = api.SaveAddOns or SaveAddOns
+        if Save then pcall(Save) end
+        db.zoneBorder = true
+        ReloadUI()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+function Zone.SetBorderOff()
+    if Zone.borderSetting and Zone.borderSetting.SetValue then
+        pcall(Zone.borderSetting.SetValue, Zone.borderSetting, false)
+    end
+    db.zoneBorder = false
+    if RefreshPanel then RefreshPanel() end
+end
+
+function Zone.CheckDownload()
+    if not db.zoneBorder or Zone.available then return end
+    local status = Zone.Status()
+    if status == "loaded" or status == "ready" then return end -- (loaded when the outline is wanted)
+    Zone.SetBorderOff()
+    if status == "disabled" then
+        StaticPopup_Show("OVERLAYMAP_ZONEBORDERS")
+    elseif not Zone.told then
+        Zone.told = true
+        Zone.Tell("Zone Border needs the \"Overlay Map: Zone Borders\" addon, a separate download (from where "
+            .. "you got Overlay Map). Install it next to Overlay Map and restart the game.")
+    end
+end
 
 -- The options window shows the swapped values (if it's open, its controls are told to read them again).
 local function NotifyOptions()
@@ -1913,20 +2712,37 @@ local function PanelSlider(parent, key, label, minValue, maxValue, step, deferre
     end
 end
 
-local function PanelCheck(parent, key, label)
+-- enabledIf: greyed out while it says no, with offLabel and offTip (hovered) saying why
+local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
     local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
     cb:SetSize(22, 22)
     cb:SetPoint("TOPLEFT", 8, 0)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     text:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     text:SetText(label)
+    if offTip then
+        cb:SetMotionScriptsWhileDisabled(true)
+        cb:SetScript("OnEnter", function(self)
+            if self:IsEnabled() then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(offTip, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
     cb:SetScript("OnClick", function(self)
         db[key] = self:GetChecked() and true or false
         SyncOverlay()
         ApplyLook()
         if RefreshPanel then RefreshPanel() end -- (rows may show or go with it)
     end)
-    function parent:Refresh() cb:SetChecked(db[key] and true or false) end
+    function parent:Refresh()
+        local on = not enabledIf or enabledIf()
+        cb:SetEnabled(on)
+        cb:SetChecked(on and db[key] and true or false)
+        text:SetText(on and label or (offLabel or label))
+        text:SetFontObject(on and "GameFontHighlightSmall" or "GameFontDisableSmall")
+    end
 end
 
 -- A button that steps through a few choices: "Label: Choice"
@@ -2069,18 +2885,21 @@ local function BuildPanel()
     Section("Markers")
     PanelSlider(Row(36), "pinOpacity", "Marker Opacity", 0.1, 1, 0.05)
     PanelSlider(Row(38), "markerSize", "Marker Size", 0.5, 2.5, 0.05)
-    PanelCheck(Row(22), "onlyMe", "Only My Arrow")
-    PanelCheck(Row(26), "arrowCustom", "My Arrow: Own Size & Opacity")
-    PanelSlider(Row(36, ArrowOwn), "arrowSize", "My Arrow Size", 0.5, 3, 0.05)
-    PanelSlider(Row(38, ArrowOwn), "arrowOpacity", "My Arrow Opacity", 0.1, 1, 0.05)
+    PanelCheck(Row(26), "onlyMe", "Only My Arrow")
     Section("Style")
     PanelCycle(Row(24), "style", "Style", STYLE_CHOICES)
     PanelCycle(Row(24), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
     PanelCycle(Row(28), "shape", "Shape", SHAPE_CHOICES, StandardStyle)
+    Section("Zone Border")
+    local function ZoneOn() return db.zoneBorder and Zone.Installed() end
+    PanelCheck(Row(22), "zoneBorder", "Zone Border", Zone.Installed, "Zone Border (needs download)",
+        "Zone Border needs the Overlay Map: Zone Borders addon, a separate download (from where you got "
+        .. "Overlay Map). Install it next to Overlay Map and restart the game.")
+    PanelCheck(Row(24, ZoneOn), "zoneSoft", "Soft Border")
+    PanelSlider(Row(38, ZoneOn), "zoneDim", "Outside Your Zone", 0, 0.6, 0.05)
     Section("Behavior")
     PanelCheck(Row(22), "clickThrough", "Click Through (Shift: use the map)")
-    PanelCheck(Row(22), "follow", "Follow Me")
-    PanelCheck(Row(26), "rememberZoom", "Remember Zoom")
+    PanelCheck(Row(26), "follow", "Follow Me")
     panel.rows = rows
 
     local move = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -2248,6 +3067,7 @@ local function BuildOptions()
     local function Register(key, name)
         local setting = Settings.RegisterAddOnSetting(category, ADDON_NAME .. "_" .. key, key, db,
             type(DEFAULTS[key]), name, DEFAULTS[key])
+        if key == "zoneBorder" then Zone.borderSetting = setting end
         setting:SetValueChangedCallback(function()
             SyncOverlay()
             ApplyLook()
@@ -2348,10 +3168,43 @@ local function BuildOptions()
         for _, c in ipairs(SHAPE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
     end, "The shape the map fades into: a rectangle with rounded corners, a diamond or an oval. "
-        .. "With a diamond or an oval, the corners of the map fade away completely; with Soft Edges off, "
-        .. "the map is cut sharp in that shape. Standard style only.")
+        .. "With Soft Edges off, the map is cut sharp in that shape. Standard style only.")
     Under(styleInit, edgeInit, StandardStyle)
     Under(styleInit, shapeInit, StandardStyle)
+
+    Header("Zone Border")
+    local zoneInit = Settings.CreateCheckbox(category, Register("zoneBorder",
+        Zone.Installed() and "Zone Border" or "Zone Border (needs download)"),
+        "Cuts the map to the outline of your zone or capital city, on top of the style and shape above "
+        .. "(Torn Parchment too). Needs the Overlay Map: Zone Borders download (a separate addon). "
+        .. "On the game's map it's the zone shown; with OpenMap, the zone you're in, "
+        .. "and the whole map shows again when you zoom out to two or three zones across. Outlines made "
+        .. "from the game's own map pictures (Stormwind's and Orgrimmar's from Waymark).")
+    -- (greyed out without the download)
+    if zoneInit and zoneInit.AddModifyPredicate then zoneInit:AddModifyPredicate(Zone.Installed) end
+    local function ZoneOn() return db.zoneBorder and Zone.Installed() end
+    for _, init in ipairs({
+        Settings.CreateCheckbox(category, Register("zoneSoft", "Soft Border"),
+            "The zone fades in from its border. Off: cut sharp."),
+        Slider("zoneDim", "Outside Your Zone", "How much of the rest of the map shows behind your zone, "
+            .. "which stands out. At 0% it's hidden.", 0, 0.6, 0.05),
+        Settings.CreateCheckbox(category, Register("zoneFit", "Fit Each New Zone"),
+            "When you enter a new zone or city, the map zooms so all of it fits."),
+        Settings.CreateCheckbox(category, Register("zoneFitOpen", "Fit Your Zone When Opening"),
+            "Every time the map opens, it's zoomed so all of your zone fits (instead of Remember Zoom)."),
+        Settings.CreateCheckbox(category, Register("zoneKeep", "Keep the Outline Over No Zone"),
+            "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the "
+            .. "outline you had stays (the rest of the map at Outside Your Zone). Off: the whole map shows there."),
+        Slider("zoneWhole", "Whole Map Zoomed Out", "With OpenMap: the whole map shows once you zoom out until "
+            .. "the outlined zone fills less than this much of the view (it comes back a little further in). "
+            .. "Higher: the whole map sooner; lower: the outline stays further out.", 0.15, 0.85, 0.05),
+        Settings.CreateCheckbox(category, Register("zoneView", "Outline the Zone in View"),
+            "With OpenMap: the outline is for the zone in the middle of the view, so moving the map to "
+            .. "another zone outlines that one (over the sea or between zones, the last one stays). "
+            .. "Off: your zone is outlined, and the whole map shows while you look at another."),
+    }) do
+        Under(zoneInit, init, ZoneOn)
+    end
 
     Header("Behavior")
     Settings.CreateCheckbox(category, Register("clickThrough", "Click Through"),
@@ -2359,7 +3212,9 @@ local function BuildOptions()
         .. "with the right button over it. Markers still show their names. Hold Shift to drag and zoom the map. "
         .. "Overlay Mode turns this on.")
     Settings.CreateCheckbox(category, Register("follow", "Follow Me"),
-        "Keeps the map centred on you while it's open, like the minimap. It holds still while the mouse is "
+        "Keeps the map centred on you while it's open, like the minimap. With the Zone Border and OpenMap it "
+        .. "stays inside your zone: still while all of it fits, following you up to its edges when zoomed in. "
+        .. "It holds still while the mouse is "
         .. "over the map (in Overlay Mode, over a marker, or with Shift held). Without OpenMap, zoom in "
         .. "with the mouse wheel to see it move: zoomed all the way out, the whole zone already fits.")
     Settings.CreateCheckbox(category, Register("rememberZoom", "Remember Zoom"),
@@ -2477,6 +3332,27 @@ function OverlayMap_Debug()
     local twins = 0
     for f in pairs(onlyHidden) do if IsTownsfolk(f) then twins = twins + 1 end end
     Say("Questie's townsfolk icons hidden (OpenMap draws its own): " .. twins)
+    do
+        local cost = Zone.cost
+        Say(string.format("Edges laid: %d times in the last %d s, %.0f ms in all", cost.n,
+            math.floor(GetTime() - cost.since + 0.5), cost.ms))
+        local w = Zone.watchCost
+        Say(string.format("Upkeep (5 times a second): %d times in the last %d s, %.1f ms each on average", w.n,
+            math.floor(GetTime() - w.since + 0.5), w.n > 0 and w.ms / w.n or 0))
+    end
+    Say("Zone Borders download: " .. Zone.Status() .. (Zone.loadReason and (" (" .. tostring(Zone.loadReason) .. ")") or ""))
+    if db.zoneBorder then
+        local info = Zone.zoneNow and C_Map.GetMapInfo(Zone.zoneNow)
+        Say("Zone border: " .. (Zone.zoneNow and (Zone.zoneNow .. " " .. tostring(info and info.name)
+            .. (Zone.zoneAnchor and string.format(", placed at %.0f, %.0f, %.0f x %.0f", Zone.zoneAnchor:GetLeft() or 0,
+                Zone.zoneAnchor:GetTop() or 0, Zone.zoneAnchor:GetWidth(), Zone.zoneAnchor:GetHeight()) or ""))
+            or ("none, " .. tostring(Zone.why or "?"))))
+        local okV, _, _, z = pcall(function() return _G.OpenMapAPI.GetView() end)
+        if Zone.zoneNow and okV and type(z) == "number" then
+            Say(string.format("  fills %d%% of the view; rest of the map at %s%%%s", Zone.Fill(Zone.zoneNow, z) * 100 + 0.5,
+                tostring(Zone.level), Zone.want ~= Zone.shown and (", changing to " .. tostring(Zone.want)) or ""))
+        end
+    end
     -- the draw order of the two layers: the markers' icons and the other addons' icons (levels)
     do
         local low, high, n = nil, nil, 0
@@ -2624,7 +3500,17 @@ events:SetScript("OnEvent", function(self, event, name)
         if db.mode ~= "hold" and db.mode ~= "press" then db.mode = "hold" end
         if type(db.edge) ~= "number" or db.edge < 0 or db.edge > 4 then db.edge = DEFAULTS.edge end
         if db.shape == "torn" then db.shape, db.style = DEFAULTS.shape, "torn" end -- (it was a shape before)
+        -- (the zone border was a shape before: now its own option, on top of the shape)
+        for _, t in ipairs({ db, db.beforeOverlay or false, db.overlaySet or false }) do
+            if t and t.shape == "zone" then
+                t.shape, t.zoneBorder, t.zoneSoft = "rect", true, (t.edge or 0) > 0
+            end
+        end
+        if db.zoneViewOff == nil then db.zoneView, db.zoneViewOff = false, true end -- (a test version had it on)
         if not SHAPE_FILES[db.shape] then db.shape = DEFAULTS.shape end
+        if db.zoneOutside == "hide" then db.zoneDim = 0 end -- (an earlier test's setting)
+        db.zoneOutside = nil
+        if type(db.zoneDim) ~= "number" then db.zoneDim = DEFAULTS.zoneDim end
         if db.style ~= "standard" and db.style ~= "torn" then db.style = DEFAULTS.style end
         local corners = { TOPRIGHT = true, TOPLEFT = true, BOTTOMRIGHT = true, BOTTOMLEFT = true }
         if not corners[db.buttonCorner] then db.buttonCorner = DEFAULTS.buttonCorner end
@@ -2635,6 +3521,13 @@ events:SetScript("OnEvent", function(self, event, name)
     elseif event == "PLAYER_LOGIN" then
         HookMap()
         ShowNames() -- (names left hidden if the game closed with the map open)
+        -- OpenMap's view moved: the zone border follows at once (not only once a second)
+        local api = _G.OpenMapAPI
+        if api and api.RegisterCallback then
+            pcall(api.RegisterCallback, Zone, "OpenMap_ViewChanged", function()
+                Zone.ViewMoved()
+            end)
+        end
         if not GetBindingKey("OVERLAYMAP_SHOW") then
             Say("Choose a key in Options > Keybindings > AddOns > Overlay Map. /omap opens the options.")
         end
