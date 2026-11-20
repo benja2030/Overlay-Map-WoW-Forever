@@ -30,7 +30,10 @@ local DEFAULTS = {
     zoneView = false, -- with the zone border and OpenMap: the outline is the zone in the middle of the view
     zoneKeep = true, -- with the zone border and OpenMap: over the sea or land of no zone, the outline stays
     zoneWhole = 0.45, -- with the zone border and OpenMap: the whole map once the zone fills less of the view
-    style = "standard", -- map style: "standard", or "torn" (torn parchment: torn, burnt paper edges)
+    style = "standard", -- map style: "standard", "torn" (torn parchment: torn, burnt paper edges) or
+                        -- "outlines" (white lines of cliffs, water and roads; Overlay Map: Outlines download)
+    outlineLines = 1,  -- Outlines style: the lines' opacity
+    outlineBack = 0.6, -- Outlines style: the dark background's opacity
     rememberZoom = true, -- open at the zoom Overlay Map's map had when it last closed
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
     overlay = false, -- overlay mode: big, in the middle, see-through, soft edges
@@ -480,12 +483,45 @@ local function HideNames()
         end
     end
     db.namesSaved = saved
+    -- (a lasting copy of how names normally are: kept even if this session's saved settings are lost)
+    db.namesNormal = CopyTable and CopyTable(saved) or saved
 end
 
 local function ShowNames()
     if not db.namesSaved or InCombatLockdown() then return end
     for name, value in pairs(db.namesSaved) do pcall(SetCVar, name, value) end
     db.namesSaved = nil
+end
+
+-- The game closed with the map open and names hidden, without saving Overlay Map's settings (a crash,
+-- Alt+F4, the game killed): the names stay off and what they were is lost with that session. At
+-- login, if every name option is off but they normally aren't, they're put back as they normally
+-- are (from the lasting copy) and it's said in the chat.
+function Keep.NamesAfterCrash()
+    if db.namesSaved or not db.namesNormal or InCombatLockdown() then return end
+    local allOff, normallyOn = true, false
+    for _, name in ipairs(NAME_CVARS) do
+        local v = GetCVar(name)
+        if v ~= nil and v ~= "0" then allOff = false end
+        if db.namesNormal[name] and db.namesNormal[name] ~= "0" then normallyOn = true end
+    end
+    if allOff and normallyOn then
+        for name, value in pairs(db.namesNormal) do pcall(SetCVar, name, value) end
+        Say("Names above heads were left off (the game seems to have closed with the map open): they're back.")
+    end
+end
+
+-- Put names back as they normally are (/omap names)
+function Keep.NamesBack()
+    if InCombatLockdown() then Say("Not in combat: try again after it.") return end
+    local from = db.namesSaved or db.namesNormal
+    if not from then
+        for _, name in ipairs(NAME_CVARS) do pcall(SetCVar, name, GetCVarDefault and GetCVarDefault(name) or "1") end
+    else
+        for name, value in pairs(from) do pcall(SetCVar, name, value) end
+    end
+    db.namesSaved = nil
+    Say("Names above heads are back as they normally are.")
 end
 
 local function ExtrasLeaveCombat()
@@ -545,6 +581,7 @@ end
 -- anchors are put back on close.
 local appliedW -- width the map area was last given, to know when the map must re-fit
 local SyncLayer, QueueRefit, Refit, ApplyLook -- (further down)
+local Outline = {} -- the Outlines style (further down)
 
 -- With a different shape, the map is zoomed so it fills the whole area (the edges that don't
 -- fit are cut off), centred on you.
@@ -684,6 +721,10 @@ local function Sync(f, scale, above)
 end
 
 SyncLayer = function()
+    if Outline.layer and Outline.layer:IsShown() then
+        Sync(Outline.layer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 0)
+        Outline.Place()
+    end
     if viewLayer then Sync(viewLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 1) end
     if layer then Sync(layer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 2) end
 end
@@ -812,9 +853,12 @@ local function ApplyOpacity()
     if settling then fade = 0 end
     fade = fade * transition
     local mapAlpha = db.opacity * fade
+    -- (Outlines: the map's painting hidden, the lines drawn on their own layer, the markers on theirs)
+    if db.style == "outlines" then mapAlpha = 0 end
     if math.abs(map:GetAlpha() - mapAlpha) > 0.001 then map:SetAlpha(mapAlpha) end
+    Outline.Apply(db.opacity * fade)
 
-    if math.abs(db.pinOpacity - db.opacity) < 0.001 then
+    if math.abs(db.pinOpacity - db.opacity) < 0.001 and db.style ~= "outlines" then
         if next(moved) then ReturnPins() end
         return
     end
@@ -846,6 +890,7 @@ end
 
 local function RestoreOpacity()
     ReturnPins()
+    Outline.Hide()
 end
 
 local fader = CreateFrame("Frame")
@@ -902,13 +947,14 @@ Zone.MEDIA = "Interface\\AddOns\\" .. Zone.ADDON .. "\\Zone\\"
 
 -- Where the outlines stand: "loaded", "ready" (installed and on, not loaded yet), "disabled"
 -- (installed, but off in the AddOns list) or "missing" (not installed)
-function Zone.Status()
+function Zone.Status(addon)
+    addon = addon or Zone.ADDON
     local api = C_AddOns or {}
     local IsLoaded = api.IsAddOnLoaded or IsAddOnLoaded
-    if IsLoaded and IsLoaded(Zone.ADDON) then return "loaded" end
+    if IsLoaded and IsLoaded(addon) then return "loaded" end
     local Info = api.GetAddOnInfo or GetAddOnInfo
     if not Info then return "missing" end
-    local ok, name, _, _, _, reason = pcall(Info, Zone.ADDON)
+    local ok, name, _, _, _, reason = pcall(Info, addon)
     if not ok or not name or reason == "MISSING" then return "missing" end
     if reason == "DISABLED" then return "disabled" end
     return "ready"
@@ -1468,6 +1514,80 @@ end
 local function HideRim()
     if rim then rim:Hide() end
 end
+
+-- Outlines style: the map's painting hidden, and instead white lines for cliffs, water and
+-- roads, made from the game's terrain, over a dark background, like other games' overlay maps. Its
+-- own layer over the map area (as the markers' layers: the map itself is made invisible), with the
+-- background filling it and each zone's lines laid over the zone's place on the map, moving and
+-- zooming with it. Each zone's picture holds only its own land's lines (so neighbours don't draw
+-- over each other on OpenMap's world), grey on black, drawn adding light (black adds nothing).
+Outline.ADDON = "OverlayMap_Outlines"
+Outline.ZONES = {} -- (filled below: every zone of Kalimdor and the Eastern Kingdoms with lines)
+for _, id in ipairs({ 1411, 1412, 1413, 1416, 1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426,
+    1427, 1428, 1429, 1430, 1431, 1432, 1433, 1434, 1435, 1436, 1437, 1438, 1439, 1440, 1441, 1442, 1443, 1444,
+    1445, 1446, 1447, 1448, 1449, 1450, 1451, 1452, 2482, 2548, 2652 }) do
+    Outline.ZONES[id] = true
+end
+Outline.frames = {}
+
+function Outline.Hide()
+    if Outline.layer then Outline.layer:Hide() end
+end
+
+function Outline.Apply(alpha)
+    if not compact or db.style ~= "outlines" or not Outline.available then Outline.Hide() return end
+    if not Outline.layer then
+        local f = CreateFrame("Frame", "OverlayMapOutlines", UIParent)
+        f:SetClipsChildren(true)
+        f.back = f:CreateTexture(nil, "BACKGROUND")
+        f.back:SetAllPoints()
+        f.back:SetColorTexture(0, 0, 0, 1)
+        Outline.layer = f
+    end
+    local f = Outline.layer
+    if not f:IsShown() then
+        f:Show()
+        SyncLayer()
+    end
+    if math.abs(f:GetAlpha() - alpha) > 0.001 then f:SetAlpha(alpha) end
+    f.back:SetAlpha(db.outlineBack or 0.6)
+    for _, z in pairs(Outline.frames) do z.tex:SetAlpha(db.outlineLines or 1) end
+end
+
+-- Each zone's lines over its place on the map shown (with OpenMap's whole world, every zone's)
+function Outline.Place()
+    local f, content = Outline.layer, Content()
+    if not (f and f:IsShown() and content) then return end
+    local cw, ch = content:GetSize()
+    if not cw or cw == 0 then return end
+    local scale = content:GetEffectiveScale() / f:GetEffectiveScale()
+    for id in pairs(Outline.ZONES) do
+        local z = Outline.frames[id]
+        if not z then
+            z = CreateFrame("Frame", nil, f)
+            z.tex = z:CreateTexture(nil, "ARTWORK")
+            z.tex:SetAllPoints()
+            z.tex:SetTexture("Interface\\AddOns\\" .. Outline.ADDON .. "\\Outlines\\" .. id)
+            z.tex:SetBlendMode("ADD")
+            z.tex:SetAlpha(db.outlineLines or 1)
+            Outline.frames[id] = z
+        end
+        local l, r, t, b = Zone.RectOnHost(id)
+        if l then
+            if math.abs(z:GetScale() - scale) > 0.0001 then z:SetScale(scale) end
+            local key = string.format("%.5f %.5f %.5f %.5f %.1f %.1f", l, r, t, b, cw, ch)
+            if z.placed ~= key then
+                z.placed = key
+                z:ClearAllPoints()
+                z:SetPoint("TOPLEFT", content, "TOPLEFT", l * cw, -t * ch)
+                z:SetSize((r - l) * cw, (b - t) * ch)
+            end
+            z:Show()
+        else
+            z:Hide()
+        end
+    end
+end
 local masks = { shape = {}, zone = {} }                  -- kind -> frame -> its mask
 local maskedTex = {                                      -- kind -> picture -> the mask on it
     shape = setmetatable({}, { __mode = "k" }),
@@ -1657,6 +1777,7 @@ end
 
 -- Whether the map needs a shape mask (a plain rectangle without soft edges doesn't)
 local function WantShapeMask()
+    if db.style == "outlines" then return false end
     return db.style == "torn" or (db.edge or 0) >= 1 or (db.shape or "rect") ~= "rect"
 end
 
@@ -1683,6 +1804,8 @@ function Zone.ApplyEdgesNow(keepZone)
             if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0, kind) end
             -- (Torn Parchment's burnt rim: faded outside your zone like the rest of the map)
             if kind == "zone" and rim and rim:IsShown() then MaskTree(rim, 0, kind) end
+            -- (Outlines style: its lines and background faded outside your zone too)
+            if kind == "zone" and Outline.layer and Outline.layer:IsShown() then MaskTree(Outline.layer, 0, kind) end
         elseif kind == "zone" and db.zoneBorder then
             Zone.Neutral("zone") -- (no outline for now, the whole map: kept for when there is)
         elseif next(maskedTex[kind]) then
@@ -2302,6 +2425,7 @@ local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
     Zone.CheckDownload() -- (Zone Border chosen without its download ready: asked, or told, at once)
+    Outline.CheckDownload() -- (the same for the Outlines style)
     if not compact then return end
     local map = Map()
     ApplyMarkerSize()
@@ -2503,6 +2627,7 @@ local function HookMap()
     if child then
         child:HookScript("OnSizeChanged", function()
             if compact and Zone.shown then Zone.PlaceZoneAnchor(Zone.shown) end
+            if compact and db.style == "outlines" then Outline.Place() end
         end)
     end
     -- Zooming the map: the markers' layer zooms with it right away.
@@ -2536,6 +2661,7 @@ local function HookMap()
                 -- (a zone border follows the map shown: at once, as OpenMap changes the map under
                 -- its view while it moves, or the outline is a frame behind, out of place)
                 if db.zoneBorder then ApplyEdges() end
+                if db.style == "outlines" then Outline.Place() end
                 QueueEdges()
             end
         end)
@@ -2613,8 +2739,9 @@ end
 
 local EDGE_CHOICES = { { 0, "Off" }, { 1, "Small" }, { 2, "Medium" }, { 3, "Large" }, { 4, "Very large" } }
 local SHAPE_CHOICES = { { "rect", "Rectangle" }, { "diamond", "Diamond" }, { "oval", "Oval" } }
-local STYLE_CHOICES = { { "standard", "Standard" }, { "torn", "Torn Parchment" } }
-local function StandardStyle() return db.style ~= "torn" end
+local STYLE_CHOICES = { { "standard", "Standard" }, { "torn", "Torn Parchment" }, { "outlines", "Outlines (beta)" } }
+local function StandardStyle() return db.style == "standard" end
+local function OutlineStyle() return db.style == "outlines" end
 
 local function Round(v, step) return math.floor(v / step + 0.5) * step end
 
@@ -2654,7 +2781,7 @@ end
 -- that mode. The other mode's values wait in the saved settings (beforeOverlay: the normal map's,
 -- while Overlay Mode is on; overlaySet: Overlay Mode's, while it's off).
 local OVERLAY_KEYS = { "opacity", "pinOpacity", "markerSize", "arrowCustom", "arrowSize", "arrowOpacity", "style",
-    "edge", "shape", "zoneBorder", "zoneSoft", "zoneDim", "clickThrough", "noFade" }
+    "edge", "shape", "zoneBorder", "zoneSoft", "zoneDim", "clickThrough", "noFade", "outlineLines", "outlineBack" }
 -- Overlay Mode the first time it's turned on: see-through, solid markers, large soft edges,
 -- click-through (the rest as the normal map has them)
 local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, noFade = true }
@@ -2672,22 +2799,64 @@ StaticPopupDialogs.OVERLAYMAP_ZONEBORDERS = {
     OnAccept = function()
         -- (as the AddOns list does: turned on, for this character and for all, then saved, which
         -- the reload alone doesn't do)
-        local api = C_AddOns or {}
-        local Enable = api.EnableAddOn or EnableAddOn
-        if Enable then
-            pcall(Enable, Zone.ADDON, UnitName("player"))
-            pcall(Enable, Zone.ADDON)
-        end
-        local Save = api.SaveAddOns or SaveAddOns
-        if Save then pcall(Save) end
-        db.zoneBorder = true
-        ReloadUI()
+        Zone.EnableAndReload(Zone.ADDON, function() db.zoneBorder = true end)
     end,
     timeout = 0,
     whileDead = true,
     hideOnEscape = true,
     preferredIndex = 3,
 }
+
+function Zone.EnableAndReload(addon, before)
+    local api = C_AddOns or {}
+    local Enable = api.EnableAddOn or EnableAddOn
+    if Enable then
+        pcall(Enable, addon, UnitName("player"))
+        pcall(Enable, addon)
+    end
+    local Save = api.SaveAddOns or SaveAddOns
+    if Save then pcall(Save) end
+    if before then before() end
+    ReloadUI()
+end
+
+-- The Outlines style's pictures are a separate download too (Overlay Map: Outlines), asked for the
+-- same way: off in the AddOns list, a window to turn it on and reload; not installed, the style goes
+-- back to Standard and it's said where to get it.
+StaticPopupDialogs.OVERLAYMAP_OUTLINES = {
+    text = "The Outlines style needs \"Overlay Map: Outlines\", which is turned off in your AddOns list.\n\n"
+        .. "Turn it on and reload the interface?",
+    button1 = "Turn On and Reload",
+    button2 = CANCEL or "Cancel",
+    OnAccept = function() Zone.EnableAndReload(Outline.ADDON, function() db.style = "outlines" end) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+function Outline.CheckDownload()
+    if db.style ~= "outlines" or Outline.available then return end
+    local api = C_AddOns or {}
+    local status = Zone.Status(Outline.ADDON)
+    if status == "ready" then
+        local Load = api.LoadAddOn or LoadAddOn
+        if Load then pcall(Load, Outline.ADDON) end
+        status = Zone.Status(Outline.ADDON)
+    end
+    if status == "loaded" then Outline.available = true return end
+    if Outline.styleSetting and Outline.styleSetting.SetValue then
+        pcall(Outline.styleSetting.SetValue, Outline.styleSetting, "standard")
+    end
+    db.style = "standard"
+    if RefreshPanel then RefreshPanel() end
+    if status == "disabled" then
+        StaticPopup_Show("OVERLAYMAP_OUTLINES")
+    else
+        Zone.Tell("The Outlines style needs the \"Overlay Map: Outlines\" addon, a separate download (from "
+            .. "where you got Overlay Map). Install it next to Overlay Map and restart the game.")
+    end
+end
 
 function Zone.SetBorderOff()
     if Zone.borderSetting and Zone.borderSetting.SetValue then
@@ -2973,6 +3142,8 @@ local function BuildPanel()
     PanelCycle(Row(24), "style", "Style", STYLE_CHOICES)
     PanelCycle(Row(24), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
     PanelCycle(Row(28), "shape", "Shape", SHAPE_CHOICES, StandardStyle)
+    PanelSlider(Row(38, OutlineStyle), "outlineLines", "Lines Opacity", 0.1, 1, 0.05)
+    PanelSlider(Row(38, OutlineStyle), "outlineBack", "Background Opacity", 0, 1, 0.05)
     Section("Zone Border")
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
     PanelCheck(Row(22), "zoneBorder", "Zone Border", Zone.Installed, "Zone Border (needs download)",
@@ -3151,6 +3322,7 @@ local function BuildOptions()
         local setting = Settings.RegisterAddOnSetting(category, ADDON_NAME .. "_" .. key, key, db,
             type(DEFAULTS[key]), name, DEFAULTS[key])
         if key == "zoneBorder" then Zone.borderSetting = setting end
+        if key == "style" then Outline.styleSetting = setting end
         setting:SetValueChangedCallback(function()
             SyncOverlay()
             ApplyLook()
@@ -3239,7 +3411,9 @@ local function BuildOptions()
         for _, c in ipairs(STYLE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
     end, "Standard: the map as it is, with the soft edges below. Torn Parchment: torn, burnt paper edges, "
-        .. "like an old map (the soft edges don't apply then).")
+        .. "like an old map (the soft edges don't apply then). Outlines (beta): the map's painting hidden, only "
+        .. "white lines for cliffs, water and roads over a dark background (needs the Overlay Map: Outlines "
+        .. "download). Made automatically from the game's terrain: some lines may be missing or wrong.")
     local edgeInit = Settings.CreateDropdown(category, Register("edge", "Soft Edges"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(EDGE_CHOICES) do container:Add(c[1], c[2]) end
@@ -3254,6 +3428,10 @@ local function BuildOptions()
         .. "With Soft Edges off, the map is cut sharp in that shape. Standard style only.")
     Under(styleInit, edgeInit, StandardStyle)
     Under(styleInit, shapeInit, StandardStyle)
+    Under(styleInit, Slider("outlineLines", "Lines Opacity", "Outlines style: how strong the white lines "
+        .. "of cliffs, water and roads are.", 0.1, 1, 0.05), OutlineStyle)
+    Under(styleInit, Slider("outlineBack", "Background Opacity", "Outlines style: how dark the background "
+        .. "behind the lines is. At 0%, only the lines over the world.", 0, 1, 0.05), OutlineStyle)
 
     Header("Zone Border")
     local zoneInit = Settings.CreateCheckbox(category, Register("zoneBorder",
@@ -3545,6 +3723,8 @@ SlashCmdList.OVERLAYMAP = function(msg)
         OverlayMap_Debug()
     elseif msg == "move" then
         ShowMover()
+    elseif msg == "names" then
+        Keep.NamesBack()
     elseif msg == "reset" then
         db.x, db.y = 0, 0
         ApplyLook()
@@ -3564,6 +3744,7 @@ events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("MODIFIER_STATE_CHANGED")
 events:RegisterEvent("PLAYER_REGEN_DISABLED")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterEvent("PLAYER_LOGOUT")
 events:SetScript("OnEvent", function(self, event, name)
     if event == "PLAYER_REGEN_DISABLED" then
         ExtrasEnterCombat()
@@ -3595,16 +3776,23 @@ events:SetScript("OnEvent", function(self, event, name)
         if db.zoneOutside == "hide" then db.zoneDim = 0 end -- (an earlier test's setting)
         db.zoneOutside = nil
         if type(db.zoneDim) ~= "number" then db.zoneDim = DEFAULTS.zoneDim end
-        if db.style ~= "standard" and db.style ~= "torn" then db.style = DEFAULTS.style end
+        if db.style ~= "standard" and db.style ~= "torn" and db.style ~= "outlines" then db.style = DEFAULTS.style end
         local corners = { TOPRIGHT = true, TOPLEFT = true, BOTTOMRIGHT = true, BOTTOMLEFT = true }
         if not corners[db.buttonCorner] then db.buttonCorner = DEFAULTS.buttonCorner end
         if db.buttonMode ~= "show" and db.buttonMode ~= "hover" and db.buttonMode ~= "hide" then
             db.buttonMode = "hover"
         end
         BuildOptions()
+    elseif event == "PLAYER_LOGOUT" then
+        -- (logging out or quitting with the map open: names back before the game saves its options)
+        if db and db.namesSaved then
+            for n, v in pairs(db.namesSaved) do pcall(SetCVar, n, v) end
+            db.namesSaved = nil
+        end
     elseif event == "PLAYER_LOGIN" then
         HookMap()
         ShowNames() -- (names left hidden if the game closed with the map open)
+        Keep.NamesAfterCrash()
         -- OpenMap's view moved: the zone border follows at once (not only once a second)
         local api = _G.OpenMapAPI
         if api and api.RegisterCallback then

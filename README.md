@@ -55,6 +55,7 @@ All the options are in **Options > AddOns > Overlay Map**. Most of them are also
 | `/omap` | Opens the options |
 | `/omap move` | Shows a box the size of the map: drag it, right-click it when done |
 | `/omap reset` | Puts the map back in the middle of the screen |
+| `/omap names` | Puts the names above heads back, if they were left off |
 | `/omap debug` | Shows what the map looks like from the inside (useful when reporting a problem) |
 
 `/overlaymap` works too.
@@ -141,6 +142,7 @@ Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría ta
 | `/omap` | Abre las opciones |
 | `/omap move` | Muestra un recuadro del tamaño del mapa: arrástralo y haz clic derecho al terminar |
 | `/omap reset` | Devuelve el mapa al centro de la pantalla |
+| `/omap names` | Devuelve los nombres sobre las cabezas, si quedaron ocultos |
 | `/omap debug` | Muestra cómo está el mapa por dentro (útil para reportar un problema) |
 
 `/overlaymap` también funciona.
