@@ -1362,9 +1362,10 @@ function Zone.SetNow()
     Zone.zoneNow = (Zone.shown and Zone.level and Zone.level < 100) and Zone.shown or nil
 end
 
-function Zone.Reset()
+function Zone.Reset(keepLoaded)
     Zone.want, Zone.shown, Zone.level, Zone.zoneNow, Zone.pending = nil, nil, nil, nil, nil
     if Zone.anim then Zone.anim:Hide() end
+    if keepLoaded then return end
     while Zone.loadOrder[1] do Zone.Unload(Zone.loadOrder[1]) end
 end
 
@@ -1384,7 +1385,8 @@ function Zone.UpdateZone()
         Zone.why = "zone " .. want .. " couldn't be placed on the map shown (" .. tostring(Map():GetMapID()) .. ")"
         want = Zone.want
     end
-    if want then Zone.Preload(want) end
+    -- (a zone's pictures for the fade are loaded once it's wanted instead of the one shown)
+    if want and want ~= Zone.shown and Zone.level ~= nil then Zone.Preload(want) end
     if Zone.level == nil then -- (the map just opened, or the shape just chosen: straight there)
         Zone.want, Zone.pending = want, nil
         Zone.shown, Zone.level = want, want and Zone.Target() or 100
@@ -1479,6 +1481,7 @@ local function MaskFor(frame, kind)
         if not ok or not made then return end
         m = made
         masks[kind][frame] = m
+        Zone.ours[m] = true
     end
     local file = kind == "zone" and ZoneFile() or ShapeFile()
     if m.file ~= file then
@@ -1513,6 +1516,7 @@ end
 -- outline and showed past the map's edges. The one taken: the hole under a city's banner if
 -- there's one, else the colour-matching band, else the last.
 Zone.dropped = setmetatable({}, { __mode = "k" }) -- picture -> OpenMap's masks taken off it
+Zone.ours = setmetatable({}, { __mode = "k" }) -- Overlay Map's masks (told from OpenMap's at once)
 function Zone.MakeRoom(r)
     if not (r.GetNumMaskTextures and r.GetMaskTexture) then return false end
     if Zone.dropped[r] and #Zone.dropped[r] >= 2 then return false end -- (ours are two at most)
@@ -1521,11 +1525,7 @@ function Zone.MakeRoom(r)
     local pick, pickRank
     for i = 1, n do
         local mk = r:GetMaskTexture(i)
-        local ours = false
-        for _, kind in ipairs({ "shape", "zone" }) do
-            for _, m in pairs(masks[kind]) do if m == mk then ours = true end end
-        end
-        if mk and not ours then
+        if mk and not Zone.ours[mk] then
             local file = tostring(mk.GetTexture and mk:GetTexture() or ""):lower()
             local rank = file:find("hole") and 3 or file:find("band") and 2 or 1
             if not pickRank or rank > pickRank or (rank == pickRank) then pick, pickRank = mk, rank end
@@ -1623,6 +1623,38 @@ local function Unmask()
     UnmaskKind("zone")
 end
 
+-- Taking every mask off when the map closed, and putting them all back when it opened, meant
+-- thousands of pictures each time (a freeze of about a second as it opened, with OpenMap). Instead,
+-- the masks stay on the pictures, given a plain white picture that cuts nothing (the normal map
+-- looks as always), and get theirs back when Overlay Map opens again. Only the pictures OpenMap's
+-- masks were taken off for room get theirs back, and lose Overlay Map's.
+Zone.NEUTRAL = "Interface\\Buttons\\WHITE8X8"
+function Zone.Neutral(kind)
+    for _, m in pairs(masks[kind]) do
+        if m.file ~= Zone.NEUTRAL then
+            m:SetTexture(Zone.NEUTRAL, "CLAMP", "CLAMP")
+            m.file = Zone.NEUTRAL
+        end
+    end
+end
+
+function Zone.Rest()
+    HideRim()
+    Zone.Neutral("shape")
+    Zone.Neutral("zone")
+    for r, list in pairs(Zone.dropped) do
+        local parent = r.GetParent and r:GetParent()
+        for _, kind in ipairs({ "shape", "zone" }) do
+            local m = maskedTex[kind][r]
+            if m then pcall(r.RemoveMaskTexture, r, m) end
+            maskedTex[kind][r] = nil
+            if parent then Zone.walked[kind][parent] = nil end
+        end
+        while #list > 0 and AddMask(r, list[#list]) do table.remove(list) end
+        if #list == 0 then Zone.dropped[r] = nil end
+    end
+end
+
 -- Whether the map needs a shape mask (a plain rectangle without soft edges doesn't)
 local function WantShapeMask()
     return db.style == "torn" or (db.edge or 0) >= 1 or (db.shape or "rect") ~= "rect"
@@ -1639,7 +1671,7 @@ local function ApplyEdges(keepZone)
 end
 function Zone.ApplyEdgesNow(keepZone)
     if compact and not keepZone then Zone.UpdateZone() end
-    if not compact then Unmask() return end
+    if not compact then Zone.Rest() return end
     if db.style == "torn" then ShowRim() else HideRim() end
     local content = Canvas().Child
     for _, kind in ipairs({ "zone", "shape" }) do -- (the zone's outline first: see MaskTree)
@@ -1651,6 +1683,8 @@ function Zone.ApplyEdgesNow(keepZone)
             if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0, kind) end
             -- (Torn Parchment's burnt rim: faded outside your zone like the rest of the map)
             if kind == "zone" and rim and rim:IsShown() then MaskTree(rim, 0, kind) end
+        elseif kind == "zone" and db.zoneBorder then
+            Zone.Neutral("zone") -- (no outline for now, the whole map: kept for when there is)
         elseif next(maskedTex[kind]) then
             UnmaskKind(kind)
         end
@@ -2351,13 +2385,13 @@ local function Restore()
     StopFade()
     SaveZoom()
     compact = false
-    Zone.Reset()
+    Zone.Reset(true) -- (the outlines' pictures stay loaded for next time)
     local map = Map()
     RevealAll()
     ShowMinimap()
     ShowExtras()
     ShowNames()
-    Unmask()
+    Zone.Rest() -- (the masks stay on, cutting nothing: see Zone.Rest)
     ApplyClickThrough() -- (compact is off: everything takes the mouse again)
     ShowMarkers()
     RestoreSize()
@@ -2385,6 +2419,7 @@ end
 local function Open()
     local map = Map()
     if not map or compact then return end
+    local t0 = debugprofilestop()
     if map:IsShown() then return end -- already open the normal way: leave it alone
     if Blocked() then return end
 
@@ -2408,10 +2443,12 @@ local function Open()
     watchAcc = 0
     lastX, lastY = nil, nil
     watcher:Show()
+    Zone.openMs = debugprofilestop() - t0
     -- The game's window layout and other map addons may still change things during the next
     -- frames: hide and apply everything once more, then show the map.
     C_Timer.After(0.05, function()
         if not compact then return end
+        local t1 = debugprofilestop()
         ConcealAll()
         for obj in pairs(hidden) do
             if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
@@ -2425,6 +2462,7 @@ local function Open()
         end
         settling = false
         ApplyLook()
+        Zone.openMs2 = debugprofilestop() - t1
         -- The map and other addons finish setting up their frames' mouse while it opens; the
         -- click-through is laid again from scratch on top of that.
         C_Timer.After(0.1, function()
@@ -3381,6 +3419,7 @@ function OverlayMap_Debug()
         local cost = Zone.cost
         Say(string.format("Edges laid: %d times in the last %d s, %.0f ms in all", cost.n,
             math.floor(GetTime() - cost.since + 0.5), cost.ms))
+        Say(string.format("Last opening: %.0f ms, then %.0f ms", Zone.openMs or 0, Zone.openMs2 or 0))
         local w = Zone.watchCost
         Say(string.format("Upkeep (5 times a second): %d times in the last %d s, %.1f ms each on average", w.n,
             math.floor(GetTime() - w.since + 0.5), w.n > 0 and w.ms / w.n or 0))
