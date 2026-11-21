@@ -107,6 +107,9 @@ local function ConcealAll()
     -- The border (title, close button, portrait) and other addons' frames are hidden
     -- completely: nothing of theirs keeps running while the map shows.
     Stop(map.BorderFrame)
+    -- (the quest log beside the small map: hidden completely, not only made invisible, or its
+    -- invisible entries under the mouse lit up quests on the map; the game gets it back on close)
+    Stop(map.QuestLog)
     for _, child in ipairs({ map:GetChildren() }) do
         if child ~= map.BorderFrame and not owned[child] then Stop(child) end
     end
@@ -582,12 +585,16 @@ end
 local appliedW -- width the map area was last given, to know when the map must re-fit
 local SyncLayer, QueueRefit, Refit, ApplyLook -- (further down)
 local Outline = {} -- the Outlines style (further down)
+local Zone = {} -- the zone border (further down; declared here as the map's opacity uses it)
 
 -- With a different shape, the map is zoomed so it fills the whole area (the edges that don't
 -- fit are cut off), centred on you.
 local function Fill()
     local map, c = Map(), Canvas()
     if not compact or math.abs(WantWidth() - 1) < 0.001 or not c.InstantPanAndZoom then return end
+    -- (not with OpenMap's world: it has no margins to fill, and zooming the map underneath to fill its
+    -- zone made OpenMap's view jump to that zone or continent each time the map underneath changed)
+    if Zone.OpenMapStitched() then return end
     local mapID = map.GetMapID and map:GetMapID()
     local layers = mapID and C_Map.GetMapArtLayers(mapID)
     local art = layers and layers[1]
@@ -610,10 +617,24 @@ local function ApplySize()
         for i = 1, c:GetNumPoints() do before.points[i] = { c:GetPoint(i) } end
         before.cw, before.ch = c:GetSize()
         before.cscale = c:GetScale()
+        -- (the map area's own size, as measured as it opened: with the quest log beside it, without)
+        if Zone.orig then before.cw, before.ch = Zone.orig.cw, Zone.orig.ch end
         -- Remembered for the "Move" box: the map area's size on screen at 100%.
         local k = map:GetEffectiveScale() / UIParent:GetEffectiveScale()
         db.areaW, db.areaH = before.cw * k, before.ch * k
+        -- (the small map's own size, the same at every opening: the next ones are sized before
+        -- the game lays the map out, see Zone.PreSize)
+        if not Zone.orig and before.cw > 0 and before.ch > 0 then
+            Zone.orig = { cw = before.cw, ch = before.ch, cscale = before.cscale }
+        end
+        Zone.orig.cscale = Zone.orig.cscale or before.cscale
     end
+    -- Sized before the game laid the map out (Zone.PreSize): if the game then laid it out, the
+    -- map is right already and only the fill for a wider or narrower shape is left; if not, the
+    -- map is laid out again here as before.
+    local pre = Zone.presized
+    Zone.presized = nil
+    if pre and Zone.openParts then Zone.openParts.pre = pre end
     c:SetScale(WantScale())
     local w = before.cw * WantWidth()
     c:SetSize(w, before.ch)
@@ -621,8 +642,63 @@ local function ApplySize()
     if appliedW ~= w then
         appliedW = w
         Refit()
+    elseif pre == "sized" then
+        -- (the game didn't lay the map out again, but it showed it already at this size, so the view
+        -- is right: only its zoom steps are worked out for the size, not the whole layout with every
+        -- addon's icons)
+        local cv = Canvas()
+        if cv.CreateZoomLevels then pcall(cv.CreateZoomLevels, cv) end
+        Zone.presizeWorks = true
+        Fill()
+    elseif pre == "done" then
+        Fill()
     end
     SyncLayer()
+end
+
+function Zone.Measure(map)
+    local c = Canvas()
+    local w, h = c:GetSize()
+    if not w or w <= 0 or not h or h <= 0 then return end
+    local log = map.QuestLog
+    if log and log:IsShown() and log:GetRight() and c:GetLeft() and c:GetRight() then
+        local ce = c:GetEffectiveScale()
+        local right = log:GetRight() * log:GetEffectiveScale() / ce
+        if right > c:GetRight() + 1 then w = right - c:GetLeft() end
+    end
+    return { cw = w, ch = h, cscale = c:GetScale() }
+end
+
+-- Opening the map lays it out (every addon's map icons with it) for the game's own size of the
+-- map area. Overlay Map's size given right after that made a second full layout, about doubling
+-- the time the map takes to open. So, from the second opening on, the map area gets Overlay
+-- Map's size in between: once the game has set the small map's frame, before it lays it out.
+function Zone.PreSize()
+    -- (with OpenMap only: that's where a layout is slow, and without it the game's zoom levels
+    -- are trimmed for Overlay Map's look, which needs the map open as Overlay Map's first)
+    if not Zone.presizing or not Zone.orig or not OpenMapLoaded() then return end
+    local c = Canvas()
+    if not c then return end
+    if not before.points then
+        before.points = {}
+        for i = 1, c:GetNumPoints() do before.points[i] = { c:GetPoint(i) } end
+        before.cw, before.ch, before.cscale = Zone.orig.cw, Zone.orig.ch, Zone.orig.cscale
+    end
+    c:SetScale(WantScale())
+    local w = before.cw * WantWidth()
+    c:SetSize(w, before.ch)
+    AnchorCanvas()
+    appliedW = w
+    Zone.presized = "sized"
+end
+-- the game laid the map out after that: nothing more to do for the size
+-- (and at Overlay Map's size: if the game had put the map area back to its own, it's done again after)
+function Zone.LaidOut(c)
+    if Zone.presized ~= "sized" or not appliedW or not before.ch then return end
+    local w, h = c:GetWidth(), c:GetHeight()
+    if math.abs(w - appliedW) < 1 and math.abs(h - before.ch) < 1 then
+        Zone.presized, Zone.presizeWorks = "done", true
+    end
 end
 
 -- Without OpenMap, the game's map can zoom out until the whole zone fits, leaving empty
@@ -662,6 +738,9 @@ local function RestoreSize()
     if not OpenMapLoaded() and map.OnFrameSizeChanged then
         -- (the game's map works out its zoom levels again, as they were)
         pcall(map.OnFrameSizeChanged, map)
+    elseif appliedW and appliedW ~= before.cw and Zone.presizeWorks and not map:IsShown() then
+        -- (closed: only the zoom steps for the map's own size; it's shown at that size next time)
+        if c.CreateZoomLevels then pcall(c.CreateZoomLevels, c) end
     elseif appliedW and appliedW ~= before.cw and map.OnFrameSizeChanged then
         pcall(map.OnFrameSizeChanged, map)
     end
@@ -844,6 +923,7 @@ end
 -- A quick fade of the whole map (and its markers) while it's laid out again, instead of it going
 -- off and on at once: 1 shown, 0 hidden (FadeTo, further down).
 local transition = 1
+local FadeTo -- (below)
 
 local function ApplyOpacity()
     local map = Map()
@@ -851,6 +931,17 @@ local function ApplyOpacity()
     -- "Keep Opacity While Moving" is off, so it works with these opacities.
     local fade = (not db.noFade and IsPlayerMoving and IsPlayerMoving()) and 0.5 or 1
     if settling then fade = 0 end
+    -- (opening: hidden until the edges are laid, so the map isn't seen uncut for a moment, then a
+    -- quick fade in; a second at most)
+    if Zone.opening then
+        if (settling or Zone.walking) and GetTime() - Zone.opening < 1 then
+            fade = 0
+        else
+            Zone.opening = nil
+            transition = 0
+            FadeTo(1, 0.15)
+        end
+    end
     fade = fade * transition
     local mapAlpha = db.opacity * fade
     -- (Outlines: the map's painting hidden, the lines drawn on their own layer, the markers on theirs)
@@ -907,7 +998,7 @@ fader:SetScript("OnUpdate", function(self)
     end
 end)
 
-local function FadeTo(target, time, done)
+FadeTo = function(target, time, done)
     fader.from, fader.to, fader.t0, fader.time, fader.done = transition, target, GetTime(), time, done
     fader:Show()
 end
@@ -929,7 +1020,6 @@ end
 local SHAPE_FILES = { rect = "Edge", diamond = "Diamond", oval = "Oval" }
 local MEDIA = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\"
 
-local Zone = {}
 -- Zone border: the map cut to the outline of a zone, one per zone and capital city. Each zone's is
 -- the land its map paints: all its exploration pieces put together, from the game's own pictures.
 -- The capitals have none: Ironforge and Undercity are cut from their indoor minimap pictures
@@ -1159,6 +1249,20 @@ function Zone.FitZoom(id)
     if not (om and om.FitZoom) then return end
     local ok, fit = pcall(om.FitZoom, id)
     if ok and type(fit) == "number" and fit > 0 and fit < math.huge then return fit end
+end
+
+-- OpenMap's zoom counts from the whole world just fitting the map area, so the same zoom shows the
+-- land bigger in a wider area. This is that fit (map area units per world unit), to keep the land's
+-- size on screen when the area's width changes: zoom * FitPx() stays the same.
+function Zone.FitPx()
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    local c = Canvas()
+    if not (S and S.Size and c) then return end
+    local ok, W, H = pcall(S.Size)
+    local cw, ch = c:GetWidth(), c:GetHeight()
+    if ok and type(W) == "number" and type(H) == "number" and W > 0 and H > 0 and cw > 0 and ch > 0 then
+        return math.min(cw / W, ch / H)
+    end
 end
 
 -- How much of the view a zone fills at OpenMap's zoom z (1: it just fits)
@@ -1809,6 +1913,7 @@ function Zone.Step()
     if coroutine.status(Zone.co) == "dead" then
         Zone.co, Zone.walking = nil, false
         Zone.driver:Hide()
+        if Zone.opening and compact then ApplyOpacity() end -- (the map can fade in now)
         if Zone.again ~= nil then
             local keep = Zone.again
             Zone.again = nil
@@ -2027,6 +2132,9 @@ local Watch -- (below)
 local ApplyClickThrough, ApplyOnlyMe, ApplyMarkerSize, ApplyArrow -- (further down)
 watcher:SetScript("OnUpdate", function(self, elapsed)
     if not compact then self:Hide(); return end
+    if Zone.openParts and GetTime() - Zone.openParts.start < 1.5 and elapsed > (Zone.worstFrame or 0) then
+        Zone.worstFrame = elapsed
+    end
     if db.follow and not settling then
         followAcc = followAcc + elapsed
         if followAcc >= 0.1 then
@@ -2515,7 +2623,12 @@ end
 -- Opening and closing
 --------------------------------------------------------------------------------
 
-local DISPLAY_MINIMIZED_NO_LOG = 2 -- the game's own state: small map without the quest log
+-- The game's map states: Overlay Map opened state 2 and turned it small through "miniWorldMap", but 2
+-- is the full screen map in the game's Classic clients, so the game laid the map out five times as it
+-- opened (small, then full screen again), every addon's map icons each time. It's now opened with the
+-- game's own minimize action (as the map's minimize button), which opens it small at once. If that
+-- ever leaves it full screen, state 2 and "miniWorldMap" are used from then on, as before.
+local DISPLAY_MINIMIZED_NO_LOG = 2
 
 local function Blocked()
     if InCombatLockdown() and Map():IsProtected() then
@@ -2537,7 +2650,7 @@ local function SaveZoom()
     local api = OpenMapLoaded() and _G.OpenMapAPI
     if api and api.IsStitched and api.IsStitched() and api.GetView then
         local ok, _, _, zoom = pcall(api.GetView)
-        if ok and type(zoom) == "number" then db.zoom = { openmap = zoom } end
+        if ok and type(zoom) == "number" then db.zoom = { openmap = zoom, fit = Zone.FitPx() } end
         return
     end
     local c = Canvas()
@@ -2558,10 +2671,13 @@ local function RestoreZoom()
         if not z.openmap then return end
         local ok, u, v = pcall(api.GetView)
         if not ok or not u then return end
+        -- (the land at the size it had on screen, even if the map's width changed since)
+        local zoom, fit = z.openmap, Zone.FitPx()
+        if z.fit and fit then zoom = zoom * z.fit / fit end
         -- At once if OpenMap allows it, otherwise a short glide.
         local om = _G.OpenMap and _G.OpenMap.GetModule and select(2, pcall(_G.OpenMap.GetModule, _G.OpenMap, "worldmap"))
-        if type(om) == "table" and om.ShowNow and pcall(om.ShowNow, u, v, z.openmap) then return end
-        if api.ShowWorld then pcall(api.ShowWorld, u, v, z.openmap) end
+        if type(om) == "table" and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
+        if api.ShowWorld then pcall(api.ShowWorld, u, v, zoom) end
         return
     end
     local c = Canvas()
@@ -2610,6 +2726,7 @@ end
 local function Open()
     local map = Map()
     if not map or compact then return end
+    Zone.opening = GetTime()
     local t0 = debugprofilestop()
     if map:IsShown() then return end -- already open the normal way: leave it alone
     if Blocked() then return end
@@ -2619,9 +2736,46 @@ local function Open()
     -- right after; nothing else reads it.
     local mini = GetCVar("miniWorldMap")
     if mini ~= "1" then pcall(SetCVar, "miniWorldMap", "1") end
-    local ok = pcall(map.SetDisplayState, map, DISPLAY_MINIMIZED_NO_LOG)
+    -- (for /omap debug: where an opening's time goes, and the slowest frame just after it)
+    local P = { start = GetTime() }
+    Zone.openParts, Zone.worstFrame = P, 0
+    local tm = debugprofilestop()
+    Zone.presizing, Zone.presized = true, nil
+    Zone.anchoring = true
+    Zone.PreSize() -- (before the game shows it; again if the game sets up the small map's frame)
+    Zone.anchoring = false
+    -- (the game's own "make the map small" action: it opens the small map with whatever number the
+    -- game gives that state, as the map's minimize button does)
+    local small = not Zone.smallFails and map.HandleUserActionMinimizeSelf
+    local ok
+    if small then
+        ok = pcall(small, map)
+        if ok and map:IsShown() then
+            local big = map.IsMaximized and map:IsMaximized()
+            local log = map.QuestLog and map.QuestLog:IsShown()
+            P.why = (big and "full screen" or "small") .. (log and ", quest log shown" or ", no quest log")
+            -- (the quest log beside the small map is hidden with the rest of the window anyway)
+            if big then
+                Zone.smallFails = true -- (as before, from now on)
+                ok = pcall(map.SetDisplayState, map, DISPLAY_MINIMIZED_NO_LOG)
+            end
+        end
+    else
+        ok = pcall(map.SetDisplayState, map, DISPLAY_MINIMIZED_NO_LOG)
+    end
+    P.state = (small and not Zone.smallFails) and "small" or "2"
+    Zone.presizing, Zone.anchoring = false, false
+    P.game = debugprofilestop() - tm
+    P.pre = Zone.presized
     if mini ~= "1" then pcall(SetCVar, "miniWorldMap", mini) end
-    if not ok or not map:IsShown() then return end
+    if not ok or not map:IsShown() then
+        if Zone.presized then RestoreSize() wipe(before) Zone.presized = nil end -- (sized for nothing)
+        return
+    end
+
+    -- (the first time: the map area's size without the quest log the small map shows beside it, so
+    -- Size and Width mean the same as before; the log is hidden while Overlay Map shows the map)
+    if not Zone.orig then Zone.orig = Zone.Measure(map) end
 
     compact = true
     before.alpha = map:GetAlpha()
@@ -2629,8 +2783,18 @@ local function Open()
     before.mouse = map:IsMouseEnabled()
     if before.mouse then map:EnableMouse(false) end
     settling = true
+    tm = debugprofilestop()
     ConcealAll()
-    ApplyLook()
+    P.hide = debugprofilestop() - tm
+    -- (Overlay Map's look laid on the next frame, not the one the game spent opening its map, so the
+    -- two don't add up into one long stop; the map is kept invisible until then)
+    map:SetAlpha(0)
+    C_Timer.After(0, function()
+        if not compact then return end
+        local tl = debugprofilestop()
+        ApplyLook()
+        P.look = debugprofilestop() - tl
+    end)
     watchAcc = 0
     lastX, lastY = nil, nil
     watcher:Show()
@@ -2640,10 +2804,14 @@ local function Open()
     C_Timer.After(0.05, function()
         if not compact then return end
         local t1 = debugprofilestop()
+        local P2 = Zone.openParts or {}
+        local tm2 = debugprofilestop()
         ConcealAll()
         for obj in pairs(hidden) do
             if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
         end
+        P2.hide2 = debugprofilestop() - tm2
+        tm2 = debugprofilestop()
         RestoreZoom()
         if db.zoneBorder and db.zoneFitMode == "open" and Zone.PlayerZone() then
             Zone.fittedFor = Zone.PlayerZone()
@@ -2651,13 +2819,18 @@ local function Open()
         else
             Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
         end
+        P2.zoom = debugprofilestop() - tm2
         settling = false
+        tm2 = debugprofilestop()
         ApplyLook()
+        P2.look2 = debugprofilestop() - tm2
         Zone.openMs2 = debugprofilestop() - t1
         -- The map and other addons finish setting up their frames' mouse while it opens; the
         -- click-through is laid again from scratch on top of that.
         C_Timer.After(0.1, function()
+            local tm3 = debugprofilestop()
             if compact then ApplyClickThrough(true) end
+            P2.click = debugprofilestop() - tm3
         end)
     end)
 end
@@ -2694,6 +2867,45 @@ local function HookMap()
     if map.ScrollContainer then
         map.ScrollContainer:HookScript("OnMouseWheel", function()
             if compact then Zone.zoomedAt = GetTime() end
+        end)
+    end
+    -- (the map area sized as the game sets up the small map, before it lays it out: Zone.PreSize)
+    if map.SynchronizeDisplayState then hooksecurefunc(map, "SynchronizeDisplayState", Zone.PreSize) end
+    if map.ScrollContainer and map.ScrollContainer.OnCanvasSizeChanged then
+        hooksecurefunc(map.ScrollContainer, "OnCanvasSizeChanged", Zone.LaidOut)
+    end
+    -- (for /omap debug: which of the map's layout steps ran as it last opened, in order, with the map
+    -- area's size at each; the list starts again as it closes)
+    Zone.trace = {}
+    map:HookScript("OnHide", function() wipe(Zone.trace) end)
+    local function Trace(obj, owner, name)
+        if type(obj[name]) ~= "function" then return end
+        hooksecurefunc(obj, name, function()
+            local t = Zone.trace
+            if #t >= 60 then return end
+            local c = Canvas()
+            t[#t + 1] = { GetTime(), owner .. name, c and c:GetWidth() or 0, c and c:GetHeight() or 0 }
+        end)
+    end
+    for _, name in ipairs({ "SetDisplayState", "SynchronizeDisplayState", "Minimize", "Maximize",
+        "OnFrameSizeChanged", "ResetZoom", "OnCanvasScaleChanged", "RefreshAll", "SetMapID" }) do
+        Trace(map, "", name)
+    end
+    if map.ScrollContainer then
+        for _, name in ipairs({ "OnCanvasSizeChanged", "CreateZoomLevels", "ResetZoom", "SetCanvasSize",
+            "InstantPanAndZoom", "SetZoomTarget" }) do
+            Trace(map.ScrollContainer, "area:", name)
+        end
+    end
+    -- (the game anchors the map area to its window as it sets up the small map, just before it lays
+    -- it out: while Overlay Map opens it, Overlay Map's size and place are put back at once, so the
+    -- game lays it out at that size, once, instead of at its own and then again at Overlay Map's)
+    if map.ScrollContainer then
+        hooksecurefunc(map.ScrollContainer, "SetPoint", function()
+            if not Zone.presizing or Zone.anchoring then return end
+            Zone.anchoring = true
+            Zone.PreSize()
+            Zone.anchoring = false
         end)
     end
     local child = map.ScrollContainer and map.ScrollContainer.Child
@@ -2835,11 +3047,26 @@ local function ApplyShape()
     FadeTo(0, 0.12, function()
         if gen ~= shapeGen then return end
         if not compact then StopFade() return end
+        -- (with OpenMap: the view kept where it was, with the land the same size on screen; OpenMap
+        -- keeps its zoom number, which in a wider area made the land bigger)
+        local view
+        if Zone.OpenMapStitched() then
+            local ok, u, v, z = pcall(_G.OpenMapAPI.GetView)
+            if ok and type(u) == "number" and type(z) == "number" then view = { u, v, z, Zone.FitPx() } end
+        end
         settling = true
         ApplyLook()      -- (the map re-fits at once while it's hidden)
         C_Timer.After(0.15, function()
             if gen ~= shapeGen then return end
             if not compact then StopFade() return end
+            local fit = Zone.FitPx()
+            if view and view[4] and fit then
+                local om = Zone.OpenMapModule()
+                local zoom = view[3] * view[4] / fit
+                if not (om and om.ShowNow and pcall(om.ShowNow, view[1], view[2], zoom)) then
+                    pcall(_G.OpenMapAPI.ShowWorld, view[1], view[2], zoom)
+                end
+            end
             settling = false
             reshaping = false
             ApplyLook()
@@ -3676,6 +3903,23 @@ function OverlayMap_Debug()
         Say(string.format("Edges laid: %d times in the last %d s, %.0f ms in all", cost.n,
             math.floor(GetTime() - cost.since + 0.5), cost.ms))
         Say(string.format("Last opening: %.0f ms, then %.0f ms", Zone.openMs or 0, Zone.openMs2 or 0))
+        local P = Zone.openParts or {}
+        do
+            local t, parts = Zone.trace or {}, {}
+            for _, e in ipairs(t) do
+                if e[1] - t[1][1] > 0.3 then break end
+                parts[#parts + 1] = string.format("%s %.0fx%.0f", e[2], e[3], e[4])
+            end
+            Say("  steps as it opened: " .. (#parts > 0 and table.concat(parts, ", ") or "none"))
+        end
+        Say("  opened with the game's state " .. tostring(P.state or "?")
+            .. (P.why and (", the small map action gave: " .. P.why) or "")
+            .. (Zone.smallFails and " (the small map action opened it full screen)" or ""))
+        Say("  map sized before the game laid it out: " .. (P.pre == "done" and "yes"
+            or P.pre == "sized" and "yes, before it opened (zoom steps only after)" or "no"))
+        Say(string.format("  game's map %.0f, hiding the interface %.0f + %.0f, look %.0f + %.0f, zoom %.0f, "
+            .. "click through %.0f ms; slowest frame in the first 1.5 s: %.0f ms", P.game or 0, P.hide or 0,
+            P.hide2 or 0, P.look or 0, P.look2 or 0, P.zoom or 0, P.click or 0, (Zone.worstFrame or 0) * 1000))
         local w = Zone.watchCost
         Say(string.format("Upkeep (5 times a second): %d times in the last %d s, %.1f ms each on average", w.n,
             math.floor(GetTime() - w.since + 0.5), w.n > 0 and w.ms / w.n or 0))
