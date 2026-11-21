@@ -1173,12 +1173,18 @@ end
 -- While the whole zone fits, it stays centred on the zone and doesn't move; zoomed in closer, it
 -- follows you up to the zone's edges.
 function Zone.Clamp(u, v, zoom)
-    if not db.zoneBorder or not Zone.shown then return u, v end
-    -- (on a flight, or out of the outlined zone: just following you, so you don't leave the view)
+    -- (no outline, zoomed out to the whole map: just following you)
+    if not db.zoneBorder or not (Zone.shown or Zone.want) then return u, v end
+    -- (on a flight, or in no outlined zone: just following you, so you don't leave the view)
     if UnitOnTaxi("player") then return u, v end
     local mine = Zone.PlayerZone()
-    if not mine or Zone.Same(mine) ~= Zone.Same(Zone.shown) then return u, v end
-    local l, r, t, b = Zone.Box(Zone.shown)
+    if not mine then return u, v end
+    -- Kept inside the zone you're in, not the outline shown: entering a new zone, the outline takes
+    -- half a second to change over, and until then the view followed you freely, then jumped back
+    -- (and fought the zoom of Fit Each New Zone, which centres on the new zone at once).
+    -- (inside a city with its zone outlined, zoomed out: the zone's box, as shown)
+    local box = (Zone.shown and Zone.Same(Zone.shown) == Zone.Same(mine)) and Zone.shown or mine
+    local l, r, t, b = Zone.Box(box)
     local S = _G.OpenMap and _G.OpenMap.MapStitch
     local c = Canvas()
     if not l or not (S and S.Size and c) then return u, v end
