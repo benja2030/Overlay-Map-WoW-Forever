@@ -48,7 +48,7 @@ The commands are now `/omap` and `/overlaymap`.
 
 ## Options and commands
 
-All the options are in **Options > AddOns > Overlay Map**. Most of them are also in the small panel that the arrow button on the map opens. In that panel, click a section's title to fold or unfold it, and size and width change when you press **Apply Size & Width**.
+All the options are in **Options > AddOns > Overlay Map**, on tabs, with a search box that finds any option. At the top: the setup wizard, **Open on the Map** (the map with its small panel, to see your changes as you make them), the map key and **Reset Everything**; each tab has its own reset button. Most options are also in the small panel that the arrow button on the map opens, on four tabs (Map, Look, Zone, Behavior); hover an option to see what it does. Size and width change when you let go of their slider.
 
 | Command | What it does |
 |---|---|
@@ -73,6 +73,7 @@ All the options are in **Options > AddOns > Overlay Map**. Most of them are also
 - Opening the map works like the game's own map: your character does the map-reading animation, and an open window like the character panel closes.
 - Inside dungeons and raids the game hides your position, so **Follow me** doesn't move the map there.
 - In combat the game doesn't let addons hide action bars or unit frames, so those are made invisible instead.
+- In combat the game doesn't let addons open the map (only its own M key can), so the key can't open it during a fight. If the map is already open when the fight starts, closing it makes it invisible until the fight ends, and the key shows it again meanwhile.
 - Without OpenMap, **Follow me** only moves the map when it's zoomed in (mouse wheel): zoomed all the way out, the whole zone already fits.
 
 ## If the addon stops loading
@@ -136,7 +137,7 @@ Los comandos ahora son `/omap` y `/overlaymap`.
 
 ## Opciones y comandos
 
-Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría también están en el panel pequeño que abre el botón con la flecha en el mapa. En ese panel, haz clic en el título de una sección para plegarla o desplegarla, y el tamaño y el ancho cambian al presionar **Apply Size & Width**.
+Todas las opciones están en **Opciones > AddOns > Overlay Map**, en pestañas, con un buscador que encuentra cualquier opción. Arriba: el asistente de configuración, **Open on the Map** (el mapa con su panel pequeño, para ver tus cambios mientras los haces), la tecla del mapa y **Reset Everything**; cada pestaña tiene su propio botón para volver a los valores por defecto. La mayoría de las opciones también están en el panel pequeño que abre el botón con la flecha en el mapa, en cuatro pestañas (Map, Look, Zone, Behavior); pasa el mouse sobre una opción para ver qué hace. El tamaño y el ancho cambian al soltar su barra.
 
 | Comando | Qué hace |
 |---|---|
@@ -161,6 +162,7 @@ Todas las opciones están en **Opciones > AddOns > Overlay Map**. La mayoría ta
 - Abrir el mapa funciona como el mapa del juego: tu personaje hace la animación de leer el mapa, y si tienes abierta una ventana como la del personaje, se cierra.
 - Dentro de dungeons y raids el juego oculta tu posición, así que ahí **Seguirme** no mueve el mapa.
 - En combate el juego no deja que los addons oculten las barras de acción ni los marcos de unidad, así que esos se vuelven invisibles en vez de ocultarse.
+- En combate el juego no deja que los addons abran el mapa (solo su propia tecla M puede), así que la tecla no lo abre durante una pelea. Si el mapa ya estaba abierto cuando empieza la pelea, cerrarlo lo deja invisible hasta que termine, y la tecla lo vuelve a mostrar mientras tanto.
 - Sin OpenMap, **Seguirme** solo mueve el mapa cuando tiene zoom (rueda del mouse): alejado al máximo, la zona entera ya cabe.
 
 ## Si el addon deja de cargar

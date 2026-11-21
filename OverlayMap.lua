@@ -35,6 +35,8 @@ local DEFAULTS = {
     outlineLines = 1,  -- Outlines style: the lines' opacity
     outlineBack = 0.6, -- Outlines style: the dark background's opacity
     rememberZoom = true, -- open at the zoom Overlay Map's map had when it last closed
+    fitPlaces = true, -- caves (with OpenMap) and dungeons: zoomed to fit as you enter them
+    liveMinimap = false, -- inside dungeons: the game's own minimap, big, in the map's place (with your arrow)
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
     overlay = false, -- overlay mode: big, in the middle, see-through, soft edges
     hideBars = false, hideUnits = false, hideChat = false, hideQuests = false, -- other parts of the
@@ -110,16 +112,23 @@ local function ConcealAll()
     -- (the quest log beside the small map: hidden completely, not only made invisible, or its
     -- invisible entries under the mouse lit up quests on the map; the game gets it back on close)
     Stop(map.QuestLog)
+    -- (Dungeon Journal's dungeon map, lent to the map window inside its dungeons: it stays, see
+    -- Zone.DungeonView)
+    local fdj = _G.ForeverDungeonJournalFrame
+    local fdjBack = fdj and fdj.dungeonMapPanel and fdj.dungeonMapPanel:GetParent()
     for _, child in ipairs({ map:GetChildren() }) do
-        if child ~= map.BorderFrame and not owned[child] then Stop(child) end
+        if child ~= map.BorderFrame and not owned[child] and child ~= fdjBack then Stop(child) end
     end
-    for _, child in ipairs({ map:GetChildren() }) do Conceal(child) end
+    for _, child in ipairs({ map:GetChildren() }) do
+        if child ~= fdjBack then Conceal(child) end
+    end
     -- Boxes other addons put inside the map area (a coordinates box, for example) are hidden;
     -- a frame covering the whole map area holds icons, so it stays.
     local c = Canvas()
     local cw, ch = c:GetSize()
     for _, child in ipairs({ c:GetChildren() }) do
-        if child ~= c.Child and not iconLayers[child] and not child.overlayMapOwn then
+        if child ~= c.Child and not iconLayers[child] and not child.overlayMapOwn
+            and child ~= _G.OpenMapDungeonView then -- (OpenMap's dungeon map: see Zone.DungeonView)
             local w, h = child:GetSize()
             if math.abs(w - cw) < 2 and math.abs(h - ch) < 2 then
                 iconLayers[child] = true
@@ -547,7 +556,8 @@ local minimapHidden = {} -- frame -> "hide" or the alpha it had
 local function MinimapFrames()
     local list = {}
     if MinimapCluster then list[#list + 1] = MinimapCluster end
-    if Minimap and Minimap:GetParent() ~= MinimapCluster then list[#list + 1] = Minimap end
+    -- (not while it's lent to the map as the live minimap: Zone.LiveMinimap)
+    if Minimap and Minimap:GetParent() ~= MinimapCluster and not Minimap.overlayMapLive then list[#list + 1] = Minimap end
     return list
 end
 
@@ -969,11 +979,13 @@ local function ApplyOpacity()
     -- The game fades the map while you move; Overlay Map does it itself (to half) when
     -- "Keep Opacity While Moving" is off, so it works with these opacities.
     local fade = (not db.noFade and IsPlayerMoving and IsPlayerMoving()) and 0.5 or 1
-    if settling then fade = 0 end
+    if settling or Zone.shelved then fade = 0 end
     -- (opening: hidden until the edges are laid, so the map isn't seen uncut for a moment, then a
     -- quick fade in; a second at most)
     if Zone.opening then
-        if (settling or Zone.walking) and GetTime() - Zone.opening < 1 then
+        -- (inside a dungeon with OpenMap: also until its dungeon map is up and tidied, a moment after)
+        local hold = Zone.holdFor and GetTime() < Zone.holdFor
+        if (settling or Zone.walking or hold) and GetTime() - Zone.opening < 1 then
             fade = 0
         else
             Zone.opening = nil
@@ -987,6 +999,11 @@ local function ApplyOpacity()
     local mapAlpha = db.opacity * fade
     -- (Outlines: the map's painting hidden, the lines drawn on their own layer, the markers on theirs)
     if db.style == "outlines" then mapAlpha = 0 end
+    -- (the live minimap in a dungeon: shown instead of the map, at its opacity)
+    if Zone.live then
+        mapAlpha = 0
+        if Minimap and math.abs(Minimap:GetAlpha() - db.opacity * fade) > 0.001 then Minimap:SetAlpha(db.opacity * fade) end
+    end
     if math.abs(map:GetAlpha() - mapAlpha) > 0.001 then map:SetAlpha(mapAlpha) end
     Outline.Apply(db.opacity * fade)
 
@@ -1006,9 +1023,12 @@ local function ApplyOpacity()
         viewLayer:SetClipsChildren(true)
     end
     SyncLayer()
-    if math.abs(layer:GetAlpha() - db.pinOpacity * fade) > 0.001 then layer:SetAlpha(db.pinOpacity * fade) end
+    -- (over OpenMap's dungeon map: the world's markers underneath kept off it)
+    -- (also while inside a dungeon its map is only away in the journal's window for a moment)
+    local pinFade = (Zone.live or Zone.DungeonViewShown() or (Zone.underAlpha ~= nil and Zone.InDungeon())) and 0 or 1
+    if math.abs(layer:GetAlpha() - db.pinOpacity * fade * pinFade) > 0.001 then layer:SetAlpha(db.pinOpacity * fade * pinFade) end
     layer:Show()
-    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * fade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * fade) end
+    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * fade * pinFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * fade * pinFade) end
     viewLayer:Show()
     for f in pairs(iconLayers) do
         if f:GetParent() ~= viewLayer then
@@ -1021,7 +1041,7 @@ local function ApplyOpacity()
             for pin in pool:EnumerateActive() do MovePin(pin) end
         end
     end
-    Zone.RaiseArrow(db.pinOpacity * fade)
+    Zone.RaiseArrow(db.pinOpacity * fade * pinFade)
 end
 
 local function RestoreOpacity()
@@ -1135,6 +1155,11 @@ Zone.ZONE_MASKS = {
 
 function Zone.WorldRect(id)
     if id == 947 then return 0, 1, 0, 1 end
+    if type(id) == "string" then -- (a cave: "cave<key>", see Zone.CaveKeyAt)
+        local r = Zone.CaveRectOf(tonumber(id:match("^cave(%-?%d+)$")))
+        if r then return r[1], r[3], r[2], r[4] end
+        return
+    end
     -- (with OpenMap's whole world, where OpenMap itself places each map: for cities it uses their
     -- corners' world positions, which on WoW: Forever are tens of yards off the game's own rect)
     local S = Zone.OpenMapStitched() and _G.OpenMap and _G.OpenMap.MapStitch
@@ -1364,6 +1389,20 @@ end
 
 -- The zone to cut to (nil: none fits; Zone.why says why, for /omap debug)
 function Zone.MaskZone()
+    -- (inside a cave: the cave's own outline, as a cave can reach past its zone's, which cut it off; the
+    -- whole map in one OpenMap has no place for)
+    -- Only while the cave is big enough in the view (as a zone's outline): zoomed out to the zone, a cave is a
+    -- speck, and cutting the map to it left almost nothing; then the zone's outline as usual.
+    if Zone.inCave then
+        local cave = Zone.caveKey and ("cave" .. Zone.caveKey)
+        local okV, _, _, z = pcall(function() return _G.OpenMapAPI.GetView() end)
+        local fit = cave and okV and type(z) == "number" and Zone.FitZoom(cave)
+        if cave and fit and z / fit >= ((Zone.want == cave) and Zone.FillOff() or Zone.FillOn()) then return cave end
+        if not cave then
+            Zone.why = "in a cave"
+            return
+        end
+    end
     local shown = Map():GetMapID()
     if not Zone.OpenMapStitched() then
         if shown and Zone.ZONE_MASKS[shown] then return shown end
@@ -1471,6 +1510,7 @@ Zone.SETTLE = 0.25
 Zone.KEEP_LOADED = 4
 
 function Zone.FileFor(zone, level)
+    if type(zone) == "string" then return Zone.CaveFile(zone) end
     return Zone.MEDIA .. zone .. ((level > 0 and level < 100) and ("d" .. level) or "")
         .. (db.zoneSoft and "s" or "")
 end
@@ -1533,6 +1573,8 @@ end
 
 -- The rest of the map's opacity set (to the nearest one there's a picture for: 5% steps to 60%)
 function Zone.Target()
+    -- (a cave's outline has no faded steps: outside it, nothing)
+    if type(Zone.shown or Zone.want) == "string" then return 0 end
     local level = math.floor((db.zoneDim or 0) * 100 / 5 + 0.5) * 5
     return math.max(0, math.min(60, level))
 end
@@ -1593,6 +1635,11 @@ function Zone.UpdateZone()
         Zone.shown, Zone.level = want, want and Zone.Target() or 100
     elseif (want or false) == (Zone.want or false) then
         Zone.pending = nil
+    elseif type(want) == "string" or type(Zone.shown) == "string" then
+        -- (into or out of a cave: the new outline at once, as the map glides there. A cave's outline has no
+        -- faded steps, so stepping through them kept the cave's shape over the surface's map for a moment)
+        Zone.want, Zone.pending = want, nil
+        Zone.shown, Zone.level = want, want and Zone.Target() or 100
     else
         -- (taken once it has stayed the one wanted for a moment)
         if Zone.pending ~= (want or false) then Zone.pending, Zone.pendingAt = want or false, GetTime() end
@@ -1645,6 +1692,7 @@ end
 local function ZoneFile()
     -- (the outline gone while the edges were being laid, a few frames at a time: cutting nothing)
     if not Zone.zoneNow then return Zone.NEUTRAL end
+    if type(Zone.zoneNow) == "string" then return Zone.CaveFile(Zone.zoneNow) end
     return Zone.MEDIA .. Zone.zoneNow .. Zone.DimSuffix() .. (db.zoneSoft and "s" or "")
 end
 
@@ -1739,11 +1787,57 @@ function Outline.Place()
                 z:SetPoint("TOPLEFT", content, "TOPLEFT", l * cw, -t * ch)
                 z:SetSize((r - l) * cw, (b - t) * ch)
             end
-            z:Show()
+            -- (inside a cave, cut to it: the surface's lines would run across it)
+            z:SetShown(type(Zone.zoneNow) ~= "string")
         else
             z:Hide()
         end
     end
+    Outline.PlaceCave(content, cw, ch, scale)
+end
+
+-- Inside a cave: its own lines (walls and water, from the game's minimap pictures of it; for a cave with a
+-- Blizzard cave map, the edge of its map), over the cave's place, from the Outlines download's CaveList.lua
+function Outline.CaveFile()
+    local key = Zone.inCave and Zone.caveKey
+    local list = _G.OverlayMap_OutlinesCaves
+    if not (key and list) then return end
+    local n
+    if key > 0 then n = list["map " .. key] else n = Zone.CaveShape(key, list) end
+    if n then return "Interface\\AddOns\\" .. Outline.ADDON .. "\\Caves\\" .. n, "cave" .. key end
+end
+
+function Outline.PlaceCave(content, cw, ch, scale)
+    local file, cave = Outline.CaveFile()
+    local l, r, t, b
+    if file then l, r, t, b = Zone.RectOnHost(cave) end
+    local z = Outline.caveFrame
+    if not l then
+        if z then z:Hide() end
+        return
+    end
+    if not z then
+        z = CreateFrame("Frame", nil, Outline.layer)
+        z.tex = z:CreateTexture(nil, "ARTWORK")
+        z.tex:SetAllPoints()
+        z.tex:SetBlendMode("ADD")
+        Outline.caveFrame = z
+        Outline.frames.cave = z -- (its opacity with the others': Outline.Apply)
+    end
+    if z.file ~= file then
+        z.file = file
+        z.tex:SetTexture(file)
+        z.tex:SetAlpha(db.outlineLines or 1)
+    end
+    if math.abs(z:GetScale() - scale) > 0.0001 then z:SetScale(scale) end
+    local key = string.format("%.5f %.5f %.5f %.5f %.1f %.1f", l, r, t, b, cw, ch)
+    if z.placed ~= key then
+        z.placed = key
+        z:ClearAllPoints()
+        z:SetPoint("TOPLEFT", content, "TOPLEFT", l * cw, -t * ch)
+        z:SetSize((r - l) * cw, (b - t) * ch)
+    end
+    z:Show()
 end
 local masks = { shape = {}, zone = {} }                  -- kind -> frame -> its mask
 local maskedTex = {                                      -- kind -> picture -> the mask on it
@@ -1764,7 +1858,8 @@ local function MaskFor(frame, kind)
     if m.file ~= file then
         -- (past its picture a mask hides everything; the dimmed zone outlines repeat their outer
         -- pixels instead, so the rest of the map stays faded, not hidden)
-        local wrap = (kind == "zone" and Zone.DimSuffix() ~= "") and "CLAMP" or "CLAMPTOBLACKADDITIVE"
+        local wrap = (kind == "zone" and Zone.DimSuffix() ~= "" and type(Zone.zoneNow) ~= "string") and "CLAMP"
+            or "CLAMPTOBLACKADDITIVE"
         m:SetTexture(file, wrap, wrap)
         m.file = file
     end
@@ -1825,6 +1920,45 @@ function Zone.GiveBack()
 end
 
 -- One frame's pictures: each gets the mask (once)
+-- Pictures with no room left for the soft edges (OpenMap's surface, carrying masks of its own and the
+-- zone's outline). Inside a cave they showed unfaded through the cave's faded edges, brown: there they're
+-- hidden (the surface over a cave is of no use), and back as they were outside it.
+Zone.noEdge = setmetatable({}, { __mode = "k" })
+Zone.bare = {} -- picture -> the opacity it had (hidden by Zone.HideBare)
+Zone.bareHooked = setmetatable({}, { __mode = "k" })
+function Zone.KeepBare(r, a)
+    if Zone.bareSetting or Zone.bare[r] == nil then return end
+    Zone.bare[r] = a -- (its own new opacity, for when it comes back)
+    Zone.bareSetting = true
+    r:SetAlpha(0)
+    Zone.bareSetting = false
+end
+function Zone.HideBare()
+    local want = compact and type(Zone.zoneNow) == "string" and Zone.WantShape()
+    if want then
+        for r in pairs(Zone.noEdge) do
+            if Zone.bare[r] == nil then
+                Zone.bare[r] = r:GetAlpha()
+                if not Zone.bareHooked[r] then
+                    Zone.bareHooked[r] = true
+                    hooksecurefunc(r, "SetAlpha", Zone.KeepBare)
+                end
+                Zone.bareSetting = true
+                r:SetAlpha(0)
+                Zone.bareSetting = false
+            end
+        end
+    end
+    for r, a in pairs(Zone.bare) do
+        if not (want and Zone.noEdge[r]) then
+            Zone.bare[r] = nil
+            Zone.bareSetting = true
+            r:SetAlpha(a)
+            Zone.bareSetting = false
+        end
+    end
+end
+
 local function MaskRegions(frame, kind, m)
     local on = maskedTex[kind]
     for _, r in ipairs({ frame:GetRegions() }) do
@@ -1848,6 +1982,8 @@ local function MaskRegions(frame, kind, m)
                     if AddMask(r, edge) then maskedTex.shape[r] = edge end
                 end
             end
+            -- (pictures left without the soft edges: see Zone.HideBare)
+            if kind == "shape" or maskedTex.shape[r] == nil then Zone.noEdge[r] = (maskedTex.shape[r] == nil) or nil end
         end
     end
 end
@@ -1918,6 +2054,7 @@ end
 
 function Zone.Rest()
     HideRim()
+    Zone.HideBare() -- (compact is off: back)
     Zone.Neutral("shape")
     Zone.Neutral("zone")
     for r, list in pairs(Zone.dropped) do
@@ -1938,6 +2075,7 @@ local function WantShapeMask()
     if db.style == "outlines" then return false end
     return db.style == "torn" or (db.edge or 0) >= 1 or (db.shape or "rect") ~= "rect"
 end
+Zone.WantShape = WantShapeMask
 
 Zone.cost = { n = 0, ms = 0, since = 0 } -- (for /omap debug: how often the edges are laid, and the time)
 -- Laying the edges can mean going through thousands of OpenMap's pictures (as the map opens, and
@@ -2003,6 +2141,7 @@ function Zone.ApplyEdgesNow(keepZone)
         if kind == "shape" then on = WantShapeMask() else on = Zone.zoneNow ~= nil end
         if on then
             if content then MaskTree(content, 0, kind) end
+            if kind == "shape" and Zone.DungeonViewShown() then MaskTree(Zone.DungeonView(), 0, kind) end
             -- (the map area's own pictures, under the map: a background some map addons put there
             -- showed uncut outside your zone, brown, and past the soft edges)
             local cv = Canvas()
@@ -2025,6 +2164,7 @@ function Zone.ApplyEdgesNow(keepZone)
             UnmaskKind(kind)
         end
     end
+    Zone.HideBare()
 end
 
 Zone.Redraw = function() ApplyEdges(true) end
@@ -2171,9 +2311,11 @@ end
 -- Your own zoom: a zoom of the map while no fit is under way (OpenMap's view, or the mouse wheel on
 -- the game's map), kept for KEEP_MY_ZOOM seconds against Fit Zone
 Zone.KEEP_MY_ZOOM = 30
+-- (only with the mouse over the map, as zooming yourself needs it there: OpenMap's own zoom changes, a
+-- glide still finishing, or another addon's, counted as yours too, and a cave went unfitted)
 function Zone.NoteZoom(z)
     if type(z) == "number" and Zone.lastZoom and math.abs(z - Zone.lastZoom) > Zone.lastZoom * 0.01
-        and not (Zone.fitUntil and GetTime() < Zone.fitUntil) and not settling then
+        and not (Zone.fitUntil and GetTime() < Zone.fitUntil) and not settling and Canvas():IsMouseOver() then
         Zone.zoomedAt = GetTime()
     end
     Zone.lastZoom = z
@@ -2190,6 +2332,529 @@ function Zone.CheckFit(instant)
     -- (you zoomed the map yourself a moment ago: your zoom is kept)
     if not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KEEP_MY_ZOOM then return end
     Zone.Fit(zone, instant)
+end
+
+-- Caves and dungeons (Fit Caves and Dungeons): entering one, the map zooms so all of it shows.
+-- * A dungeon or raid: the game shows its own map (OpenMap leaves those to the game), zoomed all the way
+--   out, so the whole layout fits (and again on another floor). The game hides your position there.
+-- * A cave or mine out in the world (with OpenMap, which draws them in its world): zoomed in till the
+--   cave fills the view, as OpenMap lets you over a cave; walking out, back to your zone (Fit Zone) or
+--   to the zoom you had.
+-- Once per place you enter (your own zoom after that is kept), not on a flight. (A dungeon: not if you
+-- zoomed the map yourself in the last 30 seconds; a cave always, as Fit Zone's pause kept it from fitting.)
+Zone.CAVE_FILL = 0.9
+
+-- OpenMap's own map of a dungeon (WoW: Forever's game has none): a frame of its own over the map area,
+-- shown as the map opens inside one. Shown in Overlay Map's look too: its bar, side panel and hint
+-- hidden, the markers of the world underneath kept off it, and cut to the soft edges or torn parchment.
+function Zone.DungeonView()
+    local v = _G.OpenMapDungeonView
+    if v and v.GetParent and v:GetParent() == Canvas() and v:IsShown() then return v end
+    -- (Dungeon Journal's, when it has the dungeon: OpenMap then leaves it to the journal. Its map is lent
+    -- to the map window on a backdrop over the map area, which follows Overlay Map's map area)
+    local ns, fdj = _G.ForeverDungeonJournal_NS, _G.ForeverDungeonJournalFrame
+    local panel = fdj and fdj.dungeonMapPanel
+    if ns and ns.IsWorldMapOverlayAttached and ns.IsWorldMapOverlayAttached() and panel then
+        local back = panel:GetParent()
+        if back and back ~= fdj and back:IsShown() then return back end
+    end
+    if v and v.GetParent and v:GetParent() == Canvas() then return v end
+end
+
+-- (for /omap debug: when OpenMap's dungeon map showed and hid, from the last opening)
+function Zone.WatchDungeonView()
+    local v = _G.OpenMapDungeonView
+    if not v or Zone.dvHooked then return end
+    Zone.dvHooked = true
+    Zone.dvLog = Zone.dvLog or {}
+    local function Note(what)
+        local P = Zone.openParts
+        local t = Zone.dvLog
+        if #t < 12 then t[#t + 1] = string.format("%s +%.2f", what, P and (GetTime() - P.start) or -1) end
+    end
+    v:HookScript("OnShow", function()
+        Note("shown")
+        -- (tidied the moment it shows: its bar was seen for a moment before)
+        if compact then
+            Zone.TidyDungeonView()
+            Zone.Unframe()
+            Zone.dvShown, Zone.holdFor = true, nil
+            ApplyOpacity()
+        end
+    end)
+    v:HookScript("OnHide", function() Note("hidden") end)
+end
+
+function Zone.DungeonViewShown()
+    local v = Zone.DungeonView()
+    return v and v:IsShown() and true or false
+end
+
+function Zone.TidyDungeonView()
+    local v = Zone.DungeonView()
+    -- (only OpenMap's: Dungeon Journal's map keeps its floor buttons and boxes)
+    if not (v and v:IsShown() and v == _G.OpenMapDungeonView) then return end
+    iconLayers[v] = nil
+    for _, child in ipairs({ v:GetChildren() }) do
+        -- (its picture's area, and the line under it naming who drew the map, stay)
+        if child ~= v.port and not (child.GetNumPoints and child:GetNumPoints() == 1 and select(2, child:GetPoint(1)) == v.port) then
+            Stop(child)
+        end
+    end
+end
+
+-- The dungeon map's dark frame around its picture (Dungeon Journal's backdrop and its panels' borders,
+-- OpenMap's dark page): made clear while Overlay Map shows it, so only the picture (its parchment) shows
+-- over the world. Put back as the map closes.
+Zone.unframed = {} -- object -> what it had
+-- Dungeon Journal lays its map out again whenever its window opens over the map (a quest or a boss
+-- clicked on it), and its frame came back: kept clear the moment it does, and the world's map under it
+-- hidden or back as its dungeon map comes and goes.
+function Zone.HookJournal()
+    local ns, fdj = _G.ForeverDungeonJournal_NS, _G.ForeverDungeonJournalFrame
+    if Zone.journalHooked or not (ns and fdj) then return end
+    Zone.journalHooked = true
+    if type(ns.RefreshWorldMapOverlay) == "function" then
+        hooksecurefunc(ns, "RefreshWorldMapOverlay", function()
+            if not compact then return end
+            if Zone.DungeonViewShown() then Zone.Unframe() else Zone.Reframe(Zone.InDungeon()) end
+            ApplyOpacity() -- (the markers kept off it, at once)
+        end)
+    end
+    for _, f in ipairs({ fdj.dungeonMapPanel, fdj.dungeonMapCanvas }) do
+        if f and f.SetBackdropColor then
+            local function Again(self, r, g, b, a, border)
+                local saved = Zone.unframed[self]
+                if Zone.reclearing or not saved or not compact or (a or 1) <= 0 then return end
+                saved[border and "border" or "back"] = { r, g, b, a }
+                Zone.reclearing = true
+                if border then self:SetBackdropBorderColor(r, g, b, 0) else self:SetBackdropColor(r, g, b, 0) end
+                Zone.reclearing = false
+            end
+            hooksecurefunc(f, "SetBackdropColor", function(self, r, g, b, a) Again(self, r, g, b, a, false) end)
+            hooksecurefunc(f, "SetBackdropBorderColor", function(self, r, g, b, a) Again(self, r, g, b, a, true) end)
+        end
+    end
+end
+
+function Zone.Unframe()
+    Zone.HookJournal()
+    local v = Zone.DungeonView()
+    if not (v and v:IsShown()) then return end
+    -- (the world's map under it, which showed round the picture once its frame was clear: hidden too)
+    local child = Canvas().Child
+    if child and Zone.underAlpha == nil then
+        Zone.underAlpha = child:GetAlpha()
+        child:SetAlpha(0)
+    end
+    local fdj = _G.ForeverDungeonJournalFrame
+    local list = { v }
+    if fdj and v ~= _G.OpenMapDungeonView then
+        list[#list + 1] = fdj.dungeonMapPanel
+        list[#list + 1] = fdj.dungeonMapCanvas
+    end
+    for _, f in ipairs(list) do
+        local had = f and Zone.unframed[f]
+        if had then
+            -- (cleared already: again, in case its addon laid it out anew)
+            if had.back and f.SetBackdropColor then
+                f:SetBackdropColor(had.back[1] or 0, had.back[2] or 0, had.back[3] or 0, 0)
+                f:SetBackdropBorderColor(had.border[1] or 0, had.border[2] or 0, had.border[3] or 0, 0)
+            end
+            for r in pairs(had.tex) do r:SetAlpha(0) end
+        elseif f then
+            local saved = {}
+            if f.GetBackdropColor and f:GetBackdrop() then
+                saved.back = { f:GetBackdropColor() }
+                saved.border = { f:GetBackdropBorderColor() }
+                local b = saved.back
+                f:SetBackdropColor(b[1] or 0, b[2] or 0, b[3] or 0, 0)
+                local e = saved.border
+                f:SetBackdropBorderColor(e[1] or 0, e[2] or 0, e[3] or 0, 0)
+            end
+            -- (plain colour fills of its own: no picture file)
+            saved.tex = {}
+            for _, r in ipairs({ f:GetRegions() }) do
+                if r:GetObjectType() == "Texture" and (r:GetDrawLayer() == "BACKGROUND" or r:GetDrawLayer() == "BORDER") then
+                    local file = r.GetTextureFilePath and r:GetTextureFilePath() or r:GetTexture()
+                    if (file == nil or file == "") and r:GetAlpha() > 0 then
+                        saved.tex[r] = r:GetAlpha()
+                        r:SetAlpha(0)
+                    end
+                end
+            end
+            Zone.unframed[f] = saved
+        end
+    end
+end
+
+-- keepUnder: the world's map under it stays hidden (inside a dungeon, while its map is only lent to the
+-- journal's own window for a moment: the world's map there is of no use, and it showed behind the window)
+function Zone.Reframe(keepUnder)
+    if Zone.underAlpha ~= nil and not keepUnder then
+        local child = Canvas().Child
+        if child then child:SetAlpha(Zone.underAlpha) end
+        Zone.underAlpha = nil
+    end
+    Zone.reclearing = true -- (its own colours back: not cleared again by the hooks above)
+    for f, saved in pairs(Zone.unframed) do
+        if saved.back and f.SetBackdropColor then
+            f:SetBackdropColor(unpack(saved.back))
+            f:SetBackdropBorderColor(unpack(saved.border))
+        end
+        for r, a in pairs(saved.tex or {}) do r:SetAlpha(a) end
+    end
+    Zone.reclearing = false
+    wipe(Zone.unframed)
+end
+
+-- Live minimap in dungeons (Live Minimap in Dungeons): inside an instance the game won't tell addons where
+-- you are, so no map can show your arrow there. The minimap is drawn by the game itself, arrow and all, so
+-- it's lent to Overlay Map's map: moved over the map area, as big as it (square), zoomed all the way out,
+-- with the map's edges and opacity, its buttons hidden; the map itself hidden meanwhile. It shows the area
+-- around you (the minimap's own range), not the whole dungeon. Put back exactly as it was when the map
+-- closes or you leave. Started out of combat only (moving it in combat isn't safe on every client).
+function Zone.WantLive()
+    return compact and db.liveMinimap and Minimap and Zone.InDungeon() and not Zone.shelved
+end
+
+function Zone.LiveMinimap()
+    local m = Minimap
+    if not m then return end
+    if Zone.live and not Zone.WantLive() then Zone.MinimapBack() return end
+    if not Zone.live then
+        if not Zone.WantLive() or InCombatLockdown() then return end
+        local saved = { parent = m:GetParent(), points = {}, size = { m:GetSize() }, scale = m:GetScale(),
+            strata = m:GetFrameStrata(), level = m:GetFrameLevel(), alpha = m:GetAlpha(), shown = m:IsShown(),
+            zoom = m.GetZoom and m:GetZoom(), kids = {} }
+        for i = 1, m:GetNumPoints() do saved.points[i] = { m:GetPoint(i) } end
+        Zone.live = saved
+        m.overlayMapLive = true
+        for _, kid in ipairs({ m:GetChildren() }) do
+            if kid:IsShown() and pcall(kid.Hide, kid) then saved.kids[kid] = true end
+        end
+        m:SetParent(UIParent)
+        if m.SetZoom then pcall(m.SetZoom, m, 0) end
+        m:Show()
+    end
+    -- (over the map area, as big as it fits; above the map. Placed
+    -- on the screen from where the map area is now, and again whenever that changes: as the map first
+    -- opens, the map area takes its size and place a moment after)
+    -- (in the minimap's own units: it may not take UIParent's scale, which left it small and off to the side)
+    local c = Canvas()
+    if math.abs(m:GetScale() - 1) > 0.001 then m:SetScale(1) end
+    local k = c:GetEffectiveScale() / m:GetEffectiveScale()
+    local side = math.min(c:GetWidth(), c:GetHeight()) * k
+    local cx, cy = c:GetCenter()
+    if side > 1 and cx then
+        cx, cy = cx * k, cy * k
+        local key = string.format("%.1f %.1f %.1f", cx, cy, side)
+        if Zone.live.placed ~= key then
+            Zone.live.placed = key
+            m:ClearAllPoints()
+            m:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx, cy)
+            m:SetSize(side, side)
+            Zone.MinimapRedraw(0)
+        end
+    end
+    -- (square, or the map's soft edges or torn parchment, as its cut; its own round one back after.
+    -- Not with SexyMap, which has a shape of its own)
+    local mask = WantShapeMask() and ShapeFile() or "Interface\\Buttons\\WHITE8X8"
+    if Zone.live.mask ~= mask and m.SetMaskTexture and not (C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded)("SexyMap") then
+        pcall(m.SetMaskTexture, m, mask)
+        Zone.live.mask = mask
+    end
+    -- (Click Through: the minimap lets the mouse through too, Shift held to use it)
+    local pass = db.clickThrough and not IsShiftKeyDown()
+    if Zone.live.pass ~= pass then
+        if Zone.live.mouse == nil then
+            Zone.live.mouse = { m:IsMouseEnabled(), m.IsMouseWheelEnabled and m:IsMouseWheelEnabled() or false }
+        end
+        Zone.live.pass = pass
+        local was = Zone.live.mouse
+        pcall(m.EnableMouse, m, not pass and was[1] or false)
+        pcall(m.EnableMouseWheel, m, not pass and was[2] or false)
+    end
+    -- (its shape is left as it is: the game has no way to read the minimap's own cut-out, and putting
+    -- back a guessed one left it blank)
+    local map = Map()
+    m:SetFrameStrata(Above(map:GetFrameStrata()))
+    m:SetFrameLevel(map:GetFrameLevel() + 4)
+end
+
+-- The game only redraws the minimap at a new size or place when its zoom changes: without this it kept
+-- drawing at the old size, in a corner of its frame (and, put back, off its ring). Zoomed one step and back.
+Zone.MINIMAP_ROUND = "Interface\\CharacterFrame\\TempPortraitAlphaMask" -- (the minimap's own sharp round cut-out on WoW: Forever)
+function Zone.MinimapRedraw(zoom)
+    local m = Minimap
+    if not (m and m.SetZoom and m.GetZoomLevels) then return end
+    zoom = zoom or m:GetZoom()
+    local other = (zoom > 0) and (zoom - 1) or math.min(1, m:GetZoomLevels() - 1)
+    pcall(m.SetZoom, m, other)
+    pcall(m.SetZoom, m, zoom)
+end
+
+function Zone.MinimapBack()
+    local m, saved = Minimap, Zone.live
+    if not (m and saved) then return end
+    Zone.live = nil
+    m.overlayMapLive = nil
+    m:SetParent(saved.parent)
+    m:ClearAllPoints()
+    for _, pt in ipairs(saved.points) do m:SetPoint(unpack(pt)) end
+    m:SetScale(saved.scale)
+    m:SetSize(saved.size[1], saved.size[2])
+    m:SetFrameStrata(saved.strata)
+    m:SetFrameLevel(saved.level)
+    m:SetAlpha(saved.alpha)
+    if saved.mask and m.SetMaskTexture then pcall(m.SetMaskTexture, m, Zone.MINIMAP_ROUND) end
+    Zone.MinimapRedraw(saved.zoom)
+    for kid in pairs(saved.kids) do pcall(kid.Show, kid) end
+    if saved.mouse then
+        pcall(m.EnableMouse, m, saved.mouse[1] and true or false)
+        pcall(m.EnableMouseWheel, m, saved.mouse[2] and true or false)
+    end
+    if not saved.shown then m:Hide() end
+    -- (turned off with the map still open: the map back in its place at once, its dungeon map laid out
+    -- again and cleared, and its edges)
+    if compact then
+        C_Timer.After(0, function()
+            if not compact or Zone.live then return end
+            local fdj = _G.ForeverDungeonJournal_NS
+            if fdj and fdj.RefreshWorldMapOverlay then pcall(fdj.RefreshWorldMapOverlay) end
+            if Zone.DungeonViewShown() then
+                Zone.TidyDungeonView()
+                Zone.Unframe()
+            end
+            ApplyOpacity()
+            wipe(Zone.walked.shape)
+            wipe(Zone.walked.zone)
+            ApplyEdges()
+        end)
+    end
+end
+
+function Zone.InDungeon()
+    local inside, kind = IsInInstance()
+    return inside and (kind == "party" or kind == "raid")
+end
+
+-- Where you are in OpenMap's world (normalized), if it can tell
+function Zone.PlayerWorld()
+    local api = _G.OpenMapAPI
+    local best = C_Map.GetBestMapForUnit("player")
+    if not (best and api and api.WorldFromMap) then return end
+    local x, y = PlayerOnMap(best)
+    if not x then return end
+    return api.WorldFromMap(best, x, y)
+end
+
+-- The cave you're in (OpenMap's rect of it: left, top, right, bottom in its world), if any
+-- Caves (Zone Border inside one): OpenMap's own lists of them, Blizzard's cave maps (OpenMap.MapCaves, each
+-- with its outline among OpenMap's pictures: MapCave\<id>, MIT licence) and every other one as the
+-- minimap draws it (OpenMap.MapCaveMinimap, cut to its box). Keys: a cave map's ID, or minus the place in
+-- the minimap's list (as OpenMap keys them). Their boxes, in OpenMap's world, worked out once.
+Zone.caveRects = {}
+Zone.CAVE_SKIP = { [34] = true, [35] = true } -- (OpenMap's: floors of one place it doesn't show)
+function Zone.CaveRectOf(key)
+    if not key then return end
+    local r = Zone.caveRects[key]
+    if r ~= nil then return r or nil end
+    local OM = _G.OpenMap
+    local S = OM and OM.MapStitch
+    if not (S and S.FromYards) then return end
+    local c, u0, v0, u1, v1
+    if key > 0 then
+        c = OM.MapCaves and OM.MapCaves[key]
+        if c then
+            local ok1, a, b = pcall(S.FromYards, c[2], c[5], c[6])
+            local ok2, d, e = pcall(S.FromYards, c[2], c[3], c[4])
+            if ok1 and ok2 then u0, v0, u1, v1 = a, b, d, e end
+        end
+    else
+        c = OM.MapCaveMinimap and OM.MapCaveMinimap[-key]
+        if c then
+            local ok1, a, b = pcall(S.FromYards, c[1], c[4], c[5])
+            local ok2, d, e = pcall(S.FromYards, c[1], c[2], c[3])
+            if ok1 and ok2 then u0, v0, u1, v1 = a, b, d, e end
+        end
+    end
+    if u0 and u1 and v0 and v1 then
+        r = { math.min(u0, u1), math.min(v0, v1), math.max(u0, u1), math.max(v0, v1) }
+    else
+        r = false
+    end
+    Zone.caveRects[key] = r
+    return r or nil
+end
+
+-- The cave at a point of OpenMap's world: the biggest whose box holds it (a small piece of another
+-- place's minimap can lie inside a big cave's box: picking the smallest cut the map to that piece)
+function Zone.CaveKeyAt(u, v)
+    local OM = _G.OpenMap
+    if not OM then return end
+    local best, area
+    local function Try(key)
+        local r = Zone.CaveRectOf(key)
+        if r and u >= r[1] and u <= r[3] and v >= r[2] and v <= r[4] then
+            local a = (r[3] - r[1]) * (r[4] - r[2])
+            if not area or a > area then best, area = key, a end
+        end
+    end
+    for id in pairs(OM.MapCaves or {}) do
+        if not Zone.CAVE_SKIP[id] then Try(id) end
+    end
+    for i in ipairs(OM.MapCaveMinimap or {}) do Try(-i) end
+    return best
+end
+
+-- A cave's outline: OpenMap's picture of a cave map's shape (soft-edged already), or, for a cave the
+-- minimap draws, its own shape from the Zone Borders download (made from the minimap's pictures of it,
+-- found by its box, as OpenMap may number its caves differently in another version); without one, its
+-- box (soft-edged with Soft Border)
+function Zone.CaveShape(key, list)
+    list = list or _G.OverlayMap_ZoneBordersCaves
+    local c = list and _G.OpenMap and _G.OpenMap.MapCaveMinimap and _G.OpenMap.MapCaveMinimap[-key]
+    if not c then return end
+    local function R(v) return math.floor((tonumber(v) or 0) + 0.5) end
+    local n = list[string.format("%d %d %d %d %d", R(c[1]), R(c[2]), R(c[3]), R(c[4]), R(c[5]))]
+    if n then return n end
+    -- (a box a few yards off, from another OpenMap version: the nearest one on the same continent)
+    local best, gap
+    for box, i in pairs(list) do
+        local t, k = {}, 0
+        for v in box:gmatch("%-?%d+") do k = k + 1 t[k] = tonumber(v) end
+        if t[1] == R(c[1]) then
+            local d = math.max(math.abs(t[2] - c[2]), math.abs(t[3] - c[3]), math.abs(t[4] - c[4]), math.abs(t[5] - c[5]))
+            if d <= 8 and (not gap or d < gap) then best, gap = i, d end
+        end
+    end
+    return best
+end
+
+function Zone.CaveFile(zone)
+    local key = tonumber(zone:match("^cave(%-?%d+)$"))
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    if key and key > 0 and S and S.CaveMasks then return S.CaveMasks .. key end
+    local n = key and key < 0 and Zone.CaveShape(key)
+    if n then return "Interface\\AddOns\\" .. Zone.ADDON .. "\\Cave\\" .. n .. (db.zoneSoft and "s" or "") end
+    -- (sharp: a plain box of Overlay Map's own, big enough that its cut has no soft rim; the game's small
+    -- white square faded over a sixteenth of the box at each edge, a glow round the cave)
+    return MEDIA .. (db.zoneSoft and "Edge2" or "Box")
+end
+
+-- The cave you're in: its box (left, top, right, bottom) and key; Zone.caveKey keeps the key
+function Zone.CaveHere()
+    Zone.caveKey = nil
+    if not (IsIndoors and IsIndoors()) or not Zone.OpenMapStitched() then return end
+    local u, v = Zone.PlayerWorld()
+    if not u then return end
+    local key = Zone.CaveKeyAt(u, v)
+    local r = key and Zone.CaveRectOf(key)
+    if r then
+        Zone.caveKey = key
+        return r[1], r[2], r[3], r[4], key
+    end
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    if not (S and S.CaveRectAt) then return end
+    local ok, u0, v0, u1, v1 = pcall(S.CaveRectAt, u, v)
+    if ok and type(u0) == "number" and u1 > u0 and v1 > v0 then return u0, v0, u1, v1 end
+end
+
+-- OpenMap's zoom at which a part of its world (left, right, top, bottom) just fits the view
+function Zone.ZoomForBox(l, r, t, b)
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    local c = Canvas()
+    if not (S and S.Size and c) then return end
+    local okS, W, H = pcall(S.Size)
+    local cw, ch = c:GetWidth(), c:GetHeight()
+    if not okS or type(W) ~= "number" or type(H) ~= "number" or W <= 0 or H <= 0 or cw <= 0 or ch <= 0 then return end
+    local z = math.min(cw / ((r - l) * W), ch / ((b - t) * H)) / math.min(cw / W, ch / H)
+    if z > 0 and z < math.huge then return z end
+end
+
+-- OpenMap's view to (u, v) at a zoom: at once (opening) or a glide
+function Zone.ViewTo(u, v, zoom, instant)
+    Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + 1 -- (Follow Me heads for this zoom meanwhile)
+    local om = Zone.OpenMapModule()
+    if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
+    pcall(_G.OpenMapAPI.ShowWorld, u, v, zoom)
+end
+
+function Zone.FitDungeon(id)
+    -- (only a dungeon map of the game's own: WoW: Forever has none, and OpenMap shows its own dungeon
+    -- maps, which fit themselves; changing the map under it showed the zone outside instead)
+    if OpenMapLoaded() then return end
+    local info = id and C_Map.GetMapInfo(id)
+    if not (info and Enum and Enum.UIMapType and (info.mapType == Enum.UIMapType.Dungeon
+        or info.mapType == Enum.UIMapType.Micro)) then return end
+    local map = Map()
+    if map:GetMapID() ~= id then pcall(map.SetMapID, map, id) end
+    C_Timer.After(0, function()
+        local c = Canvas()
+        if compact and type(c.zoomLevels) == "table" and c.zoomLevels[1] and c.InstantPanAndZoom then
+            pcall(c.InstantPanAndZoom, c, c.zoomLevels[1].scale, 0.5, 0.5, true)
+        end
+    end)
+end
+
+function Zone.FitCave(u0, v0, u1, v1, instant)
+    local okV, _, _, z = pcall(_G.OpenMapAPI.GetView)
+    if not Zone.beforeCave and okV and type(z) == "number" then Zone.beforeCave = z end
+    local fit = Zone.ZoomForBox(u0, u1, v0, v1)
+    if Zone.caveNote then Zone.caveNote.from, Zone.caveNote.ask = okV and z, fit and fit * Zone.CAVE_FILL end
+    if fit then Zone.ViewTo((u0 + u1) / 2, (v0 + v1) / 2, fit * Zone.CAVE_FILL, instant) end
+    -- (for /omap debug: the zoom OpenMap actually took, a moment later)
+    C_Timer.After(1.2, function()
+        local ok2, _, _, z2 = pcall(_G.OpenMapAPI.GetView)
+        if Zone.caveNote then Zone.caveNote.got = ok2 and z2 end
+    end)
+end
+
+function Zone.LeaveCave(instant)
+    local before = Zone.beforeCave
+    Zone.beforeCave = nil
+    local zone = Zone.PlayerZone()
+    if db.zoneBorder and db.zoneFitMode ~= "off" and zone and Zone.Available() then
+        Zone.Fit(zone, instant)
+        return
+    end
+    local u, v = Zone.PlayerWorld()
+    if before and u then Zone.ViewTo(u, v, before, instant) end
+end
+
+-- force: as the map opens with Fit Zone on each opening, the cave fitted again over the zone
+function Zone.CheckPlaces(instant, force)
+    if not db.fitPlaces or UnitOnTaxi("player") then return end
+    local mine = not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KEEP_MY_ZOOM
+    if Zone.InDungeon() then
+        Zone.caveFor, Zone.beforeCave = nil, nil
+        local id = C_Map.GetBestMapForUnit("player") or Map():GetMapID()
+        if id and id ~= Zone.dungeonFor then
+            Zone.dungeonFor = id
+            if not mine then Zone.FitDungeon(id) end
+        end
+        return
+    end
+    Zone.dungeonFor = nil
+    if not Zone.OpenMapStitched() then return end
+    local u0, v0, u1, v1 = Zone.CaveHere()
+    if u0 then
+        local key = string.format("%.5f %.5f", u0, v0)
+        if key ~= Zone.caveFor or force then
+            Zone.caveFor = key
+            -- (fitted even after a zoom of your own, with the Zone Border or without)
+            mine = false
+            Zone.caveNote = { at = GetTime(), mine = mine and true or false, instant = instant and true or false,
+                size = string.format("%.5f x %.5f", u1 - u0, v1 - v0) }
+            if not mine then Zone.FitCave(u0, v0, u1, v1, instant) end
+        end
+    elseif Zone.caveFor then
+        Zone.caveFor = nil
+        -- (back out even after a zoom of your own inside, as going in)
+        mine = false
+        if not mine then Zone.LeaveCave(instant) end
+    end
 end
 
 local edgeSweeps = 0
@@ -2232,7 +2897,8 @@ Watch = function()
         if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
     end
     if not settling then Zone.CheckFit() end
-    if not reshaping and math.abs(Canvas():GetScale() - WantScale()) > 0.001 then ApplySize() end -- (also a new screen size)
+    if Zone.live then Zone.LiveMinimap() end -- (kept over the map area; cheap when nothing moved)
+    if not reshaping and not Keep.sizing and math.abs(Canvas():GetScale() - WantScale()) > 0.001 then ApplySize() end -- (also a new screen size)
     -- (a fade left half-way, which nothing is finishing: the map shown again)
     -- (the map fades in once its edges are laid, or after a second whatever happens)
     if not reshaping and not settling and transition < 1 and not fader:IsShown()
@@ -2242,9 +2908,36 @@ Watch = function()
     ApplyOnlyMe() -- (new markers)
     ApplyMarkerSize() -- (new markers)
     if not slow then return end
+    if not settling then
+        -- (caves and dungeons, once a second; whether you're in a cave, for the zone border)
+        local before = Zone.caveKey
+        local cave = Zone.CaveHere() ~= nil
+        if cave ~= (Zone.inCave or false) or Zone.caveKey ~= before then
+            Zone.inCave = cave
+            if db.zoneBorder then ApplyEdges() end
+        end
+        if db.style == "outlines" then Outline.Place() end -- (into or out of a cave: its lines)
+        Zone.CheckPlaces()
+        if Zone.live or db.liveMinimap then Zone.LiveMinimap() end -- (entered or left a dungeon with the map open)
+        -- (OpenMap's dungeon map, opened a moment after the map)
+        Zone.WatchDungeonView()
+        local dv = Zone.DungeonViewShown()
+        if dv then
+            Zone.TidyDungeonView()
+            Zone.Unframe()
+        end
+        if dv ~= (Zone.dvShown or false) then
+            Zone.dvShown = dv
+            if not dv then Zone.Reframe(Zone.InDungeon()) end -- (the dungeon map gone: the world back under, outside dungeons)
+            ApplyOpacity()
+            QueueEdges()
+        end
+    end
     CoverScreen() -- (in case the game's window layout moved it back)
-    HideExtras()
-    if db.hideMinimap then HideMinimap() end
+    if not Zone.shelved then -- (closed in combat: the interface is back meanwhile)
+        HideExtras()
+        if db.hideMinimap then HideMinimap() end
+    end
     ApplyArrow()
     if mapButton and mapButton:IsShown() then PlaceMapButton() end -- (the map grew past the screen)
     -- (once a second, for anything the events missed; every five, the lists of children read again,
@@ -2675,13 +3368,19 @@ ApplyLook = function()
     local map = Map()
     ApplyMarkerSize()
     ApplySize()
+    Zone.LiveMinimap()
     ApplyOpacity()
     if PlayerMovementFrameFader and PlayerMovementFrameFader.RemoveFrame then
         PlayerMovementFrameFader.RemoveFrame(map)
     end
     Place()
-    if db.hideMinimap then HideMinimap() else ShowMinimap() end
-    HideExtras()
+    if Zone.shelved then
+        ShowMinimap()
+        ShowExtras()
+    else
+        if db.hideMinimap then HideMinimap() else ShowMinimap() end
+        HideExtras()
+    end
     if db.hideNames then HideNames() else ShowNames() end
     ApplyEdges()
     ApplyClickThrough()
@@ -2718,6 +3417,9 @@ end
 
 local function SaveZoom()
     if not db.rememberZoom then return end
+    -- (not inside a dungeon: the map there is the game's world map behind the dungeon's own, and its zoom,
+    -- saved over OpenMap's, left the map all the way out once you were back outside)
+    if Zone.InDungeon() then return end
     local api = OpenMapLoaded() and _G.OpenMapAPI
     if api and api.IsStitched and api.IsStitched() and api.GetView then
         local ok, _, _, zoom = pcall(api.GetView)
@@ -2759,6 +3461,9 @@ end
 
 local function Restore()
     if not compact then return end
+    Zone.Unshelve(false)
+    Zone.Reframe() -- (the dungeon map's frame, as it was)
+    Zone.MinimapBack() -- (the minimap back in its corner, if it was lent to the map)
     StopFade()
     SaveZoom()
     compact = false
@@ -2796,6 +3501,8 @@ end
 
 local function Open()
     local map = Map()
+    -- (closed in combat, so only made invisible: shown again)
+    if map and compact and Zone.shelved then Zone.Unshelve(true) return end
     if not map or compact then return end
     Zone.opening = GetTime()
     local t0 = debugprofilestop()
@@ -2810,6 +3517,13 @@ local function Open()
     -- (for /omap debug: where an opening's time goes, and the slowest frame just after it)
     local P = { start = GetTime() }
     Zone.openParts, Zone.worstFrame = P, 0
+    Zone.WatchDungeonView()
+    Zone.dvLog = {}
+    Zone.holdFor = nil
+    if OpenMapLoaded() and Zone.InDungeon() and not (_G.ForeverDungeonJournal_NS and _G.ForeverDungeonJournal_NS.CurrentDungeon
+        and _G.ForeverDungeonJournal_NS.CurrentDungeon()) then
+        Zone.holdFor = GetTime() + 0.4
+    end
     local tm = debugprofilestop()
     Zone.presizing, Zone.presized = true, nil
     Zone.anchoring = true
@@ -2856,6 +3570,9 @@ local function Open()
     settling = true
     tm = debugprofilestop()
     ConcealAll()
+    -- (a dungeon's map, put up by Dungeon Journal as the map showed: its dark frame cleared at once, not
+    -- seen for a moment as the map fades in)
+    Zone.Unframe()
     P.hide = debugprofilestop() - tm
     -- (Overlay Map's look laid on the next frame, not the one the game spent opening its map, so the
     -- two don't add up into one long stop; the map is kept invisible until then)
@@ -2883,6 +3600,17 @@ local function Open()
         end
         P2.hide2 = debugprofilestop() - tm2
         tm2 = debugprofilestop()
+        -- (Dungeon Journal laid its dungeon's map out as the map showed, at the map area's size then: the
+        -- first time, before Overlay Map's size, so it came out small and zoomed out. Laid out again now)
+        -- (only when the map area wasn't at Overlay Map's size yet as the map showed: the first opening after
+        -- a reload; laying it out again costs a moment every time)
+        local fdj = _G.ForeverDungeonJournal_NS
+        if P2.pre ~= "sized" and fdj and fdj.IsWorldMapOverlayAttached and fdj.IsWorldMapOverlayAttached()
+            and fdj.RefreshWorldMapOverlay then
+            pcall(fdj.RefreshWorldMapOverlay)
+            Zone.Unframe()
+        end
+        Zone.inCave = Zone.CaveHere() ~= nil -- (in a cave: no zone outline, see Zone.MaskZone)
         RestoreZoom()
         if db.zoneBorder and db.zoneFitMode == "open" and Zone.PlayerZone() then
             Zone.fittedFor = Zone.PlayerZone()
@@ -2890,6 +3618,8 @@ local function Open()
         else
             Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
         end
+        -- (in a cave or a dungeon: fitted to it, over the zone)
+        Zone.CheckPlaces(true, db.zoneBorder and db.zoneFitMode == "open")
         -- (Follow Me: the view where it keeps it, from the start)
         if db.follow then
             lastX, lastY = nil, nil
@@ -2906,15 +3636,60 @@ local function Open()
         C_Timer.After(0.1, function()
             local tm3 = debugprofilestop()
             if compact then ApplyClickThrough(true) end
+            -- (OpenMap's dungeon map, opened by now inside a dungeon: tidied and its markers off)
+            Zone.holdFor = nil -- (its dungeon map tidied by now, if it's up: the map can fade in)
+            if compact and Zone.DungeonViewShown() then
+                Zone.TidyDungeonView()
+                Zone.Unframe()
+                Zone.dvShown = true
+                ApplyOpacity()
+                QueueEdges()
+            end
             P2.click = debugprofilestop() - tm3
         end)
     end)
 end
 
+-- In combat the game doesn't let an addon hide the map while it holds a protected marker (your group's):
+-- closing it then left it open, and Overlay Map handed it back to the game, so the normal map with its
+-- border showed up. Now it's kept open but invisible, without the mouse, and closed as combat ends; the
+-- key shows it again meanwhile.
+function Zone.Shelve()
+    if Zone.shelved then return end
+    Zone.shelved = true
+    local c = Canvas()
+    Zone.shelfMouse = { c:IsMouseEnabled(), c.IsMouseWheelEnabled and c:IsMouseWheelEnabled() or false }
+    pcall(c.EnableMouse, c, false)
+    pcall(c.EnableMouseWheel, c, false)
+    Zone.MinimapBack()
+    ApplyOpacity()
+    if mapButton then mapButton:Hide() end
+    if panel then panel:Hide() end
+    -- (what's hidden while the map is open comes back, as if it had closed)
+    ShowMinimap()
+    ShowExtras()
+end
+
+-- show: back on screen (the key pressed again); otherwise only its mouse back (it's being closed)
+function Zone.Unshelve(show)
+    if not Zone.shelved then return end
+    Zone.shelved = false
+    local c, m = Canvas(), Zone.shelfMouse
+    Zone.shelfMouse = nil
+    if m then
+        pcall(c.EnableMouse, c, m[1] and true or false)
+        pcall(c.EnableMouseWheel, c, m[2] and true or false)
+    end
+    if show and compact then ApplyLook() end
+end
+
 local function Close()
     if not compact then return end
     local map = Map()
+    if InCombatLockdown() and map:IsProtected() then Zone.Shelve() return end
     if HideUIPanel then HideUIPanel(map) else map:Hide() end
+    if map:IsShown() and InCombatLockdown() then Zone.Shelve() return end -- (refused without a word)
+    Zone.Unshelve(false)
     Restore() -- in case hiding did not reach the OnHide hook
 end
 
@@ -2943,6 +3718,13 @@ local function HookMap()
     map.OverlayMapHooked = true
     -- Closed by Esc, by another window, or anything else: put everything back.
     map:HookScript("OnHide", Restore)
+    -- (for /omap debug: the map's own shows and hides around an opening)
+    local function NoteMap(what)
+        local P, t = Zone.openParts, Zone.dvLog
+        if t and #t < 12 then t[#t + 1] = string.format("map %s +%.2f", what, P and (GetTime() - P.start) or -1) end
+    end
+    map:HookScript("OnShow", function() NoteMap("shown") end)
+    map:HookScript("OnHide", function() NoteMap("hidden") end)
     -- Opened the normal way (M, L, a quest link) while Overlay Map shows it: the game takes over.
     for _, method in ipairs({ "HandleUserActionToggleSelf", "HandleUserActionToggleQuestLog",
                               "HandleUserActionOpenSelf", "HandleUserActionOpenQuestLog" }) do
@@ -3156,6 +3938,11 @@ local OVERLAY_KEYS = { "opacity", "pinOpacity", "markerSize", "arrowCustom", "ar
 local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, noFade = true }
 
 local RefreshPanel -- (further down)
+-- The small panel and the main options read the settings again (an option may grey out or show others)
+function Keep.RefreshAll()
+    if RefreshPanel then RefreshPanel() end
+    if Keep.RefreshOptions then Keep.RefreshOptions() end
+end
 
 -- Zone Border on, but its download not ready: off in the AddOns list, a window asks to turn it on
 -- and reload (Zone Border stays off unless that's accepted); not installed, it's turned off and
@@ -3218,7 +4005,7 @@ function Outline.CheckDownload()
         pcall(Outline.styleSetting.SetValue, Outline.styleSetting, "standard")
     end
     db.style = "standard"
-    if RefreshPanel then RefreshPanel() end
+    Keep.RefreshAll()
     if status == "disabled" then
         StaticPopup_Show("OVERLAYMAP_OUTLINES")
     else
@@ -3232,7 +4019,7 @@ function Zone.SetBorderOff()
         pcall(Zone.borderSetting.SetValue, Zone.borderSetting, false)
     end
     db.zoneBorder = false
-    if RefreshPanel then RefreshPanel() end
+    Keep.RefreshAll()
 end
 
 function Zone.CheckDownload()
@@ -3279,15 +4066,66 @@ local function SyncOverlay()
         return
     end
     NotifyOptions()
-    if RefreshPanel then RefreshPanel() end
+    Keep.RefreshAll()
     if compact then ApplyShape() end
 end
 
--- The small panel. Its rows are grouped in sections whose titles fold and unfold them (remembered),
--- and rows that don't apply right now aren't shown at all: Size and Width in Overlay Mode, your
--- arrow's size and opacity until you choose to set them. The panel grows and shrinks to fit.
--- A plain slider: label on the left, value on the right, the bar under them.
-local function PanelSlider(parent, key, label, minValue, maxValue, step, deferred)
+-- Each option's line of help, shown when hovering it in the small panel and the setup wizard
+Keep.TIPS = {
+    overlay = "The map fills the whole screen, see-through and click-through. It keeps settings of its own.",
+    scale = "Size of the map. Applied when you let go of the slider.",
+    width = "Width of the map compared to its usual shape (lower: more square). Applied when you let go.",
+    opacity = "How see-through the map itself is. At 0%, only the markers show.",
+    pinOpacity = "How see-through the markers are: quests, vendors, your arrow and other addons' icons.",
+    markerSize = "Size of the markers, Questie's and OpenMap's icons too.",
+    onlyMe = "Hides every marker except your own arrow.",
+    style = "Standard, Torn Parchment (torn, burnt paper edges) or Outlines (white lines of cliffs, water and roads; needs the Overlay Map: Outlines download).",
+    edge = "The map fades out towards its edges, like other games' overlay maps. Standard style only.",
+    shape = "The shape the map's edges fade into. With Soft Edges off, it's cut sharp in that shape.",
+    outlineLines = "How strong the white lines are.",
+    outlineBack = "How dark the background behind the lines is. At 0%, only the lines.",
+    zoneBorder = "Cuts the map to your zone's outline (inside a cave, to the cave's).",
+    zoneSoft = "The zone fades in from its border, instead of a sharp cut.",
+    zoneDim = "How much of the map outside your zone shows. At 0% it's hidden.",
+    zoneFitMode = "Zooms the map so all of your zone fits: when you enter a zone, or also each time the map opens.",
+    clickThrough = "Clicks go through the map to the world. Hold Shift to drag and zoom the map.",
+    follow = "Keeps the map centred on you as you move. It holds still while the mouse is over the map.",
+    fitPlaces = "Entering a cave or mine, the map zooms in on it, and back out as you leave.",
+    liveMinimap = "Inside dungeons, the game's own minimap (with your arrow) shown big in the map's place.",
+    mode = "Hold: the map shows while you hold the key. Press: one press shows it, the next hides it.",
+}
+
+-- A tooltip on a control (its text: the option's line of help, or `text`)
+function Keep.Tip(frame, key, text)
+    frame:HookScript("OnEnter", function(self)
+        local tip = (frame.offTip and frame.IsEnabled and not frame:IsEnabled() and frame.offTip) or text or Keep.TIPS[key]
+        if not tip then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(tip, 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    frame:HookScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
+-- Size and Width from a slider: laid out again (with the fade) once you let go, or a moment after the
+-- last turn of the mouse wheel, instead of on every step
+function Keep.ShapeSoon(delay)
+    if Keep.shapeTimer then Keep.shapeTimer:Cancel() end
+    Keep.shapeTimer = C_Timer.NewTimer(delay or 0, function()
+        Keep.shapeTimer = nil
+        Keep.sizing = nil
+        if compact then Zone.Reshape() end
+    end)
+end
+
+-- The small panel. Its options are on four tabs (Map, Look, Zone, Behavior), and rows that don't apply
+-- right now aren't shown (Size and Width in Overlay Mode, the Outlines style's sliders with another
+-- style). The panel keeps the height of its tallest tab, so it doesn't jump as you switch.
+-- A plain slider: label on the left, value on the right, the bar under them. reshape: Size and Width,
+-- laid out again once you let go (Keep.ShapeSoon)
+-- (fmt: how its value reads, a percentage if none; parent.enabledIf: greyed out while it says no)
+local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape, fmt)
+    local function Show(fs, v) fs:SetText(fmt and fmt(v) or string.format("%d%%", v * 100 + 0.5)) end
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     text:SetPoint("TOPLEFT", 12, 0)
     text:SetText(label)
@@ -3313,23 +4151,30 @@ local function PanelSlider(parent, key, label, minValue, maxValue, step, deferre
     end)
     s:SetScript("OnValueChanged", function(self, v)
         v = Round(v, step)
-        value:SetText(string.format("%d%%", v * 100 + 0.5))
+        Show(value, v)
         if self.silent then return end
-        if deferred then
-            pending[key] = math.abs((db[key] or 0) - v) > 0.0001 and v or nil
-            if panel and panel.UpdateApply then panel:UpdateApply() end
-            return
-        end
         if math.abs((db[key] or 0) - v) < 0.0001 then return end
         db[key] = v
+        if reshape then
+            Keep.sizing = true -- (not laid out meanwhile: Watch)
+            -- (dragging: once you let go; the mouse wheel: a moment after the last turn)
+            if not IsMouseButtonDown("LeftButton") then Keep.ShapeSoon(0.4) end
+            return
+        end
         ApplyLook()
     end)
+    if reshape then s:SetScript("OnMouseUp", function() Keep.ShapeSoon(0) end) end
+    Keep.Tip(s, key)
     function parent:Refresh()
         pending[key] = nil
         s.silent = true
         s:SetValue(db[key])
         s.silent = false
-        value:SetText(string.format("%d%%", db[key] * 100 + 0.5))
+        Show(value, db[key])
+        local on = not parent.enabledIf or parent.enabledIf()
+        if on then s:Enable() else s:Disable() end
+        s:SetAlpha(on and 1 or 0.4)
+        text:SetFontObject(on and "GameFontHighlightSmall" or "GameFontDisableSmall")
     end
 end
 
@@ -3341,25 +4186,19 @@ local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     text:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     text:SetText(label)
-    if offTip then
-        cb:SetMotionScriptsWhileDisabled(true)
-        cb:SetScript("OnEnter", function(self)
-            if self:IsEnabled() then return end
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetText(offTip, 1, 1, 1, 1, true)
-            GameTooltip:Show()
-        end)
-        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    end
+    cb.offTip = offTip
+    cb:SetMotionScriptsWhileDisabled(true)
+    Keep.Tip(cb, key)
     cb:SetScript("OnClick", function(self)
         db[key] = self:GetChecked() and true or false
         SyncOverlay()
         ApplyLook()
-        if RefreshPanel then RefreshPanel() end -- (rows may show or go with it)
+        Keep.RefreshAll() -- (rows may show or go with it)
         if Wizard.Changed then Wizard.Changed(key) end
     end)
     function parent:Refresh()
-        local on = not enabledIf or enabledIf()
+        local cond = enabledIf or parent.enabledIf
+        local on = not cond or cond()
         cb:SetEnabled(on)
         cb:SetChecked(on and db[key] and true or false)
         text:SetText(on and label or (offLabel or label))
@@ -3367,30 +4206,69 @@ local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
     end
 end
 
--- A button that steps through a few choices: "Label: Choice"
+-- A choice among a few: "< Label: Choice >", the arrows (or a click on the text) stepping through them
 local function PanelCycle(parent, key, label, choices, enabledIf)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetHeight(20)
-    b:SetPoint("TOPLEFT", 10, 0)
-    b:SetPoint("TOPRIGHT", -10, 0)
-    function parent:Refresh()
-        for _, c in ipairs(choices) do
-            if c[1] == db[key] then b:SetText(label .. ": " .. c[2]) end
-        end
-        if enabledIf then b:SetEnabled(enabledIf()) end
+    local function Arrow(side)
+        local b = CreateFrame("Button", nil, parent)
+        b:SetSize(18, 18)
+        b:SetPoint(side == "left" and "TOPLEFT" or "TOPRIGHT", side == "left" and 10 or -10, 0)
+        local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        t:SetPoint("CENTER", 0, 1)
+        t:SetText(side == "left" and "<" or ">")
+        b:SetFontString(t)
+        b:SetNormalFontObject("GameFontNormalLarge")
+        b:SetHighlightFontObject("GameFontHighlightLarge")
+        b:SetDisabledFontObject("GameFontDisableLarge")
+        b:SetMotionScriptsWhileDisabled(true)
+        Keep.Tip(b, key)
+        return b
     end
-    b:SetScript("OnClick", function()
+    local back = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    back:SetPoint("TOPLEFT", 8, 1)
+    back:SetPoint("TOPRIGHT", -8, 1)
+    back:SetHeight(20)
+    back:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
+    back:SetBackdropColor(1, 0.85, 0.3, 0.07)
+    local left, right = Arrow("left"), Arrow("right")
+    local mid = CreateFrame("Button", nil, parent)
+    mid:SetPoint("TOPLEFT", left, "TOPRIGHT", 2, 0)
+    mid:SetPoint("BOTTOMRIGHT", right, "BOTTOMLEFT", -2, 0)
+    local text = mid:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    text:SetPoint("CENTER")
+    mid:SetFontString(text)
+    mid:SetMotionScriptsWhileDisabled(true)
+    Keep.Tip(mid, key)
+    local function Step(by)
         for i, c in ipairs(choices) do
             if c[1] == db[key] then
-                db[key] = choices[i % #choices + 1][1]
+                db[key] = choices[(i - 1 + by) % #choices + 1][1]
                 break
             end
         end
         SyncOverlay()
         ApplyLook()
-        if RefreshPanel then RefreshPanel() end -- (other rows may depend on this one)
+        Keep.RefreshAll() -- (other rows may depend on this one)
         if Wizard.Changed then Wizard.Changed(key) end
-    end)
+    end
+    left:SetScript("OnClick", function() Step(-1) end)
+    right:SetScript("OnClick", function() Step(1) end)
+    mid:SetScript("OnClick", function() Step(1) end)
+    function parent:Refresh()
+        for _, c in ipairs(choices) do
+            if c[1] == db[key] then text:SetText(label .. ": |cffffd100" .. c[2] .. "|r") end
+        end
+        local cond = enabledIf or parent.enabledIf
+        local on = not cond or cond()
+        left:SetEnabled(on)
+        right:SetEnabled(on)
+        mid:SetEnabled(on)
+        text:SetFontObject(on and "GameFontHighlightSmall" or "GameFontDisableSmall")
+        if not on then
+            for _, c in ipairs(choices) do
+                if c[1] == db[key] then text:SetText(label .. ": " .. c[2]) end
+            end
+        end
+    end
 end
 
 local function NotOverlay() return not db.overlay end
@@ -3424,9 +4302,11 @@ local function PlacePanel()
     end
 end
 
+Keep.TABS = { "Map", "Look", "Zone", "Behavior" }
+
 local function BuildPanel()
     panel = CreateFrame("Frame", "OverlayMapPanel", UIParent, "BackdropTemplate")
-    panel:SetWidth(230)
+    panel:SetWidth(240)
     panel:SetFrameStrata("FULLSCREEN_DIALOG")
     panel:SetClampedToScreen(true)
     panel:EnableMouse(true)
@@ -3442,100 +4322,80 @@ local function BuildPanel()
     close:SetPoint("TOPRIGHT", 0, 0)
     close:SetScript("OnClick", function() panel:Hide() end)
 
-    -- (the first time: the sections changed less often start folded)
-    if type(db.panelFolded) ~= "table" then db.panelFolded = { Style = true, Behavior = true } end
-    local rows, section = {}, nil
-    -- a row: a frame across the panel, `height` tall; shown when its section is unfolded and
-    -- `when` (if any) says so
+    if not tContains(Keep.TABS, db.panelTab) then db.panelTab = "Map" end
+    -- the tabs: a row of buttons under the title, the one shown in gold and underlined
+    local tabs = {}
+    local tabW = (240 - 20) / #Keep.TABS
+    for i, name in ipairs(Keep.TABS) do
+        local b = CreateFrame("Button", nil, panel)
+        b:SetSize(tabW, 20)
+        b:SetPoint("TOPLEFT", 10 + (i - 1) * tabW, -30)
+        local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        t:SetPoint("CENTER")
+        t:SetText(name)
+        b.text = t
+        b.line = b:CreateTexture(nil, "ARTWORK")
+        b.line:SetColorTexture(1, 0.82, 0, 0.9)
+        b.line:SetHeight(2)
+        b.line:SetPoint("BOTTOMLEFT", 4, 0)
+        b.line:SetPoint("BOTTOMRIGHT", -4, 0)
+        b:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
+        b:GetHighlightTexture():SetAlpha(0.2)
+        b:SetScript("OnClick", function()
+            db.panelTab = name
+            RefreshPanel()
+        end)
+        tabs[name] = b
+    end
+    local base = panel:CreateTexture(nil, "ARTWORK")
+    base:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+    base:SetHeight(1)
+    base:SetPoint("TOPLEFT", 10, -50)
+    base:SetPoint("TOPRIGHT", -10, -50)
+
+    local rows, tab = {}, nil
+    -- a row: a frame across the panel, `height` tall; shown on its tab when `when` (if any) says so
     local function Row(height, when)
         local f = CreateFrame("Frame", nil, panel)
         f:SetHeight(height)
-        f.height, f.section, f.when = height, section, when
+        f.height, f.tab, f.when = height, tab, when
         f.Refresh = function() end
         rows[#rows + 1] = f
         return f
     end
-    -- a section title: click it to fold or unfold the rows under it
-    local function Section(name)
-        section = nil
-        local f = Row(22)
-        local b = CreateFrame("Button", nil, f)
-        b:SetPoint("TOPLEFT", 8, -4)
-        b:SetPoint("BOTTOMRIGHT", -8, 0)
-        local sign = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        sign:SetPoint("LEFT", 4, 0)
-        local text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        text:SetPoint("LEFT", 16, 0)
-        text:SetText(name)
-        local line = b:CreateTexture(nil, "ARTWORK")
-        line:SetColorTexture(0.75, 0.55, 0.15, 0.4)
-        line:SetHeight(1)
-        line:SetPoint("LEFT", text, "RIGHT", 6, 0)
-        line:SetPoint("RIGHT", b, "RIGHT", -4, 0)
-        b:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
-        b:GetHighlightTexture():SetAlpha(0.25)
-        b:SetScript("OnClick", function()
-            db.panelFolded[name] = not db.panelFolded[name] or nil
-            RefreshPanel()
-        end)
-        f.Refresh = function() sign:SetText(db.panelFolded[name] and "+" or "-") end
-        section = name
-    end
+    local function Gap(h) Row(h) end
 
+    tab = "Map"
     PanelCheck(Row(28), "overlay", "Overlay Mode (full screen)")
-    Section("Map")
     PanelSlider(Row(36, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
-    PanelSlider(Row(36, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
-    do
-        -- Apply for size and width, lit only while there is something to apply
-        local f = Row(28, NotOverlay)
-        local apply = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        apply:SetHeight(20)
-        apply:SetPoint("TOPLEFT", 10, 0)
-        apply:SetPoint("TOPRIGHT", -10, 0)
-        apply:SetText("Apply Size & Width")
-        apply:SetScript("OnClick", function()
-            for key, v in pairs(pending) do db[key] = v end
-            wipe(pending)
-            panel:UpdateApply()
-            ApplyShape()
-        end)
-        function panel:UpdateApply()
-            if next(pending) then apply:Enable() else apply:Disable() end
-        end
-    end
+    PanelSlider(Row(38, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
     PanelSlider(Row(38), "opacity", "Map Opacity", 0, 1, 0.05)
-    Section("Markers")
     PanelSlider(Row(36), "pinOpacity", "Marker Opacity", 0.1, 1, 0.05)
     PanelSlider(Row(38), "markerSize", "Marker Size", 0.5, 2.5, 0.05)
-    PanelCheck(Row(26), "onlyMe", "Only My Arrow")
-    Section("Style")
-    PanelCycle(Row(24), "style", "Style", STYLE_CHOICES)
-    PanelCycle(Row(24), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
-    PanelCycle(Row(28), "shape", "Edge Shape", SHAPE_CHOICES, StandardStyle)
+    PanelCheck(Row(24), "onlyMe", "Only My Arrow")
+    tab = "Look"
+    PanelCycle(Row(26), "style", "Style", STYLE_CHOICES)
+    PanelCycle(Row(26), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
+    PanelCycle(Row(30), "shape", "Edge Shape", SHAPE_CHOICES, StandardStyle)
     PanelSlider(Row(38, OutlineStyle), "outlineLines", "Lines Opacity", 0.1, 1, 0.05)
     PanelSlider(Row(38, OutlineStyle), "outlineBack", "Background Opacity", 0, 1, 0.05)
-    Section("Zone Border")
+    tab = "Zone"
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
-    PanelCheck(Row(22), "zoneBorder", "Zone Border", Zone.Installed, "Zone Border (needs download)",
+    PanelCheck(Row(24), "zoneBorder", "Zone Border", Zone.Installed, "Zone Border (needs download)",
         "Zone Border needs the Overlay Map: Zone Borders addon, a separate download (from where you got "
         .. "Overlay Map). Install it next to Overlay Map and restart the game.")
-    PanelCheck(Row(24, ZoneOn), "zoneSoft", "Soft Border")
-    PanelSlider(Row(38, ZoneOn), "zoneDim", "Outside Your Zone", 0, 0.6, 0.05)
-    Section("Behavior")
-    PanelCheck(Row(22), "clickThrough", "Click Through (Shift: use the map)")
-    PanelCheck(Row(26), "follow", "Follow Me")
+    PanelCheck(Row(26, ZoneOn), "zoneSoft", "Soft Border")
+    PanelSlider(Row(40, ZoneOn), "zoneDim", "Outside Your Zone", 0, 0.6, 0.05)
+    PanelCycle(Row(26, ZoneOn), "zoneFitMode", "Fit Zone", Wizard.FIT_CHOICES)
+    tab = "Behavior"
+    PanelCycle(Row(28), "mode", "Key", Wizard.MODE_CHOICES)
+    PanelCheck(Row(24), "clickThrough", "Click Through (Shift: use the map)")
+    PanelCheck(Row(24), "follow", "Follow Me")
+    PanelCheck(Row(24), "fitPlaces", "Fit Caves", OpenMapLoaded, "Fit Caves (needs OpenMap)",
+        "Fit Caves needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
+    PanelCheck(Row(24), "liveMinimap", "Live Minimap in Dungeons")
     panel.rows = rows
 
-    local setup = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    setup:SetHeight(20)
-    setup:SetPoint("BOTTOMLEFT", 10, 58)
-    setup:SetPoint("BOTTOMRIGHT", -10, 58)
-    setup:SetText("Setup Wizard")
-    setup:SetScript("OnClick", function()
-        panel:Hide()
-        Wizard.Open()
-    end)
     local move = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     move:SetHeight(20)
     move:SetPoint("BOTTOMLEFT", 10, 34)
@@ -3549,10 +4409,19 @@ local function BuildPanel()
     all:SetText("All Options")
     all:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("") end)
 
+    local TOP = 56
     local function Layout()
-        local y = -32
+        local tall = 0
+        for _, name in ipairs(Keep.TABS) do
+            local h = 0
+            for _, f in ipairs(rows) do
+                if f.tab == name and (not f.when or f.when()) then h = h + f.height end
+            end
+            tall = math.max(tall, h)
+        end
+        local y = -TOP
         for _, f in ipairs(rows) do
-            local shown = not (f.section and db.panelFolded[f.section]) and (not f.when or f.when())
+            local shown = f.tab == db.panelTab and (not f.when or f.when())
             f:SetShown(shown)
             if shown then
                 f:ClearAllPoints()
@@ -3561,14 +4430,18 @@ local function BuildPanel()
                 y = y - f.height
             end
         end
-        panel:SetHeight(-y + 4 + 82)
+        for name, b in pairs(tabs) do
+            local on = name == db.panelTab
+            b.text:SetFontObject(on and "GameFontNormalSmall" or "GameFontDisableSmall")
+            b.line:SetShown(on)
+        end
+        panel:SetHeight(TOP + tall + 4 + 58)
         move:SetEnabled(not db.overlay)
     end
 
     panel:SetScript("OnShow", function(self)
         for _, f in ipairs(self.rows) do f:Refresh() end
         Layout()
-        self:UpdateApply()
         PlacePanel()
     end)
     RefreshPanel = function()
@@ -3580,7 +4453,7 @@ end
 --------------------------------------------------------------------------------
 -- Setup wizard: a window that walks through the key and the main options, with the map open
 -- behind it so every change shows at once. Shown once, the first time Overlay Map is installed;
--- again from the options ("Setup Wizard"), the small panel or /omap setup.
+-- again from the options ("Setup Wizard") or /omap setup.
 -- It always starts from the default settings: what you had is kept aside, and comes back if you
 -- close it midway and choose not to keep its settings (or if the game closes during it).
 --------------------------------------------------------------------------------
@@ -3615,7 +4488,7 @@ function Wizard.Load(t)
     for _, k in ipairs(Wizard.BOOKKEEPING) do db[k] = Wizard.Copy(t[k]) end
     wipe(pending)
     if compact then ApplyShape(true) else ApplyLook() end
-    if RefreshPanel then RefreshPanel() end
+    Keep.RefreshAll()
     -- (the options window isn't told setting by setting: that runs each option's change again, and
     -- it reads the settings anew when it's next opened)
 end
@@ -3682,6 +4555,7 @@ function Wizard.Changed(key)
     if Wizard.changing then return end
     Wizard.changing = true
     Wizard.Refresh()
+    if Keep.RefreshOptions then Keep.RefreshOptions() end
     Wizard.changing = false
     -- (Zone Border turned on or off with the map open: every picture's cut-outs laid again from
     -- scratch, the zone's first, as when the map opens; added on top of the soft edges, OpenMap's
@@ -3696,7 +4570,7 @@ function Wizard.Changed(key)
         StaticPopup_Show("OVERLAYMAP_FOLLOW_FIT")
     end
     -- (Zone Border turned on: the map glides to your zone, so you see it at once)
-    if key == "zoneBorder" and db.zoneBorder and compact and Zone.Available() then
+    if key == "zoneBorder" and db.zoneBorder and compact and Zone.Available() and not Zone.inCave then
         C_Timer.After(0.3, function()
             local zone = compact and db.zoneBorder and Zone.PlayerZone()
             if zone then
@@ -3900,7 +4774,7 @@ end
 function Wizard.Build()
     local f = CreateFrame("Frame", "OverlayMapSetup", UIParent, "BackdropTemplate")
     Wizard.frame = f
-    f:SetSize(340, 500)
+    f:SetSize(340, 530)
     f:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
     f:SetFrameStrata("FULLSCREEN_DIALOG")
     f:SetClampedToScreen(true)
@@ -4042,6 +4916,10 @@ function Wizard.Build()
         .. "Hold Shift to drag and zoom the map.", 44)
     PanelCheck(Wizard.Row(p, 24), "follow", "Follow Me")
     Wizard.Note(p, "The map stays centred on you as you move, like the minimap.", 30)
+    PanelCheck(Wizard.Row(p, 24), "fitPlaces", "Fit Caves", OpenMapLoaded, "Fit Caves (needs OpenMap)",
+        "Fit Caves needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
+    Wizard.Note(p, OpenMapLoaded() and "Entering a cave or mine, the map zooms in on it."
+        or "Needs OpenMap, which draws the caves and mines out in the world.", 30)
     Wizard.Text(p, "Also hide while the map is open:", 20, "GameFontNormalSmall")
     PanelCheck(Wizard.Row(p, 22), "hideMinimap", "Minimap")
     for _, group in ipairs(HIDE_GROUPS) do PanelCheck(Wizard.Row(p, 22), group.key, group.label) end
@@ -4285,14 +5163,126 @@ end
 
 local category
 
-local function BuildOptions()
+-- A page's options (or every one) back to their defaults, through the options themselves, so the window
+-- and the map follow
+function Keep.ResetSettings(list)
+    for _, item in ipairs(list) do
+        local setting, key = item[1], item[2]
+        local default = DEFAULTS[key]
+        if type(default) == "table" then default = CopyTable(default) end
+        if setting.SetValue then pcall(setting.SetValue, setting, default) else db[key] = default end
+    end
+    SyncOverlay()
+    ApplyLook()
+    Keep.RefreshAll()
+end
+
+-- One of the options' sub-pages, by its name
+function Keep.OpenPage(name)
+    for _, page in ipairs(Keep.pages or {}) do
+        if page.name == name and page.cat ~= category then
+            if not (SettingsPanel and SettingsPanel.SelectCategory and pcall(SettingsPanel.SelectCategory, SettingsPanel, page.cat)) then
+                pcall(Settings.OpenToCategory, page.cat:GetID())
+            end
+            return
+        end
+    end
+end
+
+function Keep.ResetAll()
+    for _, page in ipairs(Keep.pages or {}) do Keep.ResetSettings(page.settings) end
+    for _, name in ipairs(Keep.options and Keep.OPTION_TABS or {}) do Keep.ResetTab(name) end
+    db.x, db.y = 0, 0
+    ApplyLook()
+    Say("Every option is back to its default.")
+end
+
+StaticPopupDialogs.OVERLAYMAP_RESET_ALL = {
+    text = "Put every Overlay Map option back to its default?\n\n(Your map key stays as it is.)",
+    button1 = YES or "Yes",
+    button2 = NO or "No",
+    OnAccept = function() Keep.ResetAll() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- "Open on the Map" (main options): the game doesn't let the map and the options window be open together
+-- (opening one closes the other), so the options window closes, and the map opens with its small panel,
+-- where the main options can be changed while you see them
+function Keep.Preview()
+    if InCombatLockdown() then Say("Not in combat: try again after it.") return end
+    if SettingsPanel and SettingsPanel:IsShown() then pcall(HideUIPanel, SettingsPanel) end
+    C_Timer.After(0, function()
+        if not compact then Open() end
+        -- (its panel once the map has settled; beside the options button, or the map if the button is hidden)
+        C_Timer.After(0.3, function()
+            if not compact then return end
+            if not panel then BuildPanel() end
+            UpdateMapButton()
+            panel:Show()
+            if not (mapButton and mapButton:IsShown()) then
+                panel:ClearAllPoints()
+                panel:SetPoint("TOPLEFT", Canvas(), "TOPRIGHT", 8, 0)
+            end
+        end)
+    end)
+end
+
+-- Set Key (main options, on a client without the game's key rows there): waits for the next key
+function Keep.CatchKey()
+    if InCombatLockdown() then Say("Keys can't be changed in combat: try again after it.") return end
+    local c = Keep.catcher
+    if not c then
+        c = CreateFrame("Button", nil, UIParent)
+        c:SetAllPoints(UIParent)
+        c:SetFrameStrata("TOOLTIP")
+        c:EnableKeyboard(true)
+        local bg = c:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0, 0, 0, 0.5)
+        c.text = c:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        c.text:SetPoint("CENTER", 0, 80)
+        c:SetScript("OnKeyDown", function(self, key)
+            if Wizard.MODIFIERS[key] then return end
+            self:Hide()
+            Keep.GotKey(key)
+        end)
+        c:SetScript("OnMouseDown", function(self, button)
+            self:Hide()
+            Keep.GotKey(Wizard.MOUSE[button]) -- (a left or right click cancels)
+        end)
+        Keep.catcher = c
+    end
+    c.text:SetText("Press the key that shows the map\n\n|cffaaaaaaEscape or a click cancels|r")
+    c:Show()
+end
+
+function Keep.GotKey(key)
+    if not key or key == "ESCAPE" then return end
+    local combo = Wizard.Combo(key)
+    local used = Wizard.UsedFor(combo)
+    if Wizard.Bind(combo) then
+        Say("Map key: " .. Wizard.KeyText(combo) .. (used and (" (it was used for " .. used .. ")") or "") .. ".")
+    end
+    Keep.RefreshAll()
+end
+
+function Keep.ListOptions()
     if not Settings or not Settings.RegisterVerticalLayoutCategory then return end
     local layout
     category, layout = Settings.RegisterVerticalLayoutCategory("Overlay Map")
+    -- The options are split over pages (the main one and sub-pages under it in the AddOns list), each
+    -- with a button putting it back to its defaults. P: the page being built (its category, layout and
+    -- settings). A client without sub-pages gets them as sections of one page.
+    local P = { cat = category, layout = layout, settings = {}, name = "Overlay Map" }
+    Keep.pages = { P }
 
     local function Register(key, name)
-        local setting = Settings.RegisterAddOnSetting(category, ADDON_NAME .. "_" .. key, key, db,
+        local setting = Settings.RegisterAddOnSetting(P.cat, ADDON_NAME .. "_" .. key, key, db,
             type(DEFAULTS[key]), name, DEFAULTS[key])
+        P.settings[#P.settings + 1] = { setting, key }
         if key == "zoneBorder" then Zone.borderSetting = setting end
         if key == "style" then Outline.styleSetting = setting end
         setting:SetValueChangedCallback(function()
@@ -4309,20 +5299,46 @@ local function BuildOptions()
         options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
             return string.format("%d%%", value * 100 + 0.5)
         end)
-        return Settings.CreateSlider(category, Register(key, name), options, tooltip)
+        return Settings.CreateSlider(P.cat, Register(key, name), options, tooltip)
     end
 
+    -- (an option that needs OpenMap: its name says so when OpenMap isn't there, and it's greyed out)
+    local function NeedsOM(name) return OpenMapLoaded() and name or (name .. " (needs OpenMap)") end
+
     local function Header(name)
-        if layout and CreateSettingsListSectionHeaderInitializer then
-            layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(name))
+        if P.layout and CreateSettingsListSectionHeaderInitializer then
+            P.layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(name))
         end
     end
 
     local function Button(name, label, fn, tooltip)
-        if not (layout and CreateSettingsButtonInitializer) then return end
+        if not (P.layout and CreateSettingsButtonInitializer) then return end
         local init = CreateSettingsButtonInitializer(name, label, fn, tooltip, false)
-        layout:AddInitializer(init)
+        P.layout:AddInitializer(init)
         return init
+    end
+
+    -- A page's last row: its settings back to their defaults
+    local function ResetRow()
+        local page = P
+        Button("", "Reset This Page", function() Keep.ResetSettings(page.settings) end,
+            "Puts every option on this page back to its default.")
+    end
+
+    -- The next page: a sub-page of Overlay Map's, or (without sub-pages) a section of the one page
+    local function Page(name)
+        ResetRow()
+        if Settings.RegisterVerticalLayoutSubcategory then
+            local ok, cat, lay = pcall(Settings.RegisterVerticalLayoutSubcategory, category, name)
+            if ok and cat and lay then
+                P = { cat = cat, layout = lay, settings = {}, name = name }
+                Keep.pages[#Keep.pages + 1] = P
+                return
+            end
+        end
+        P = { cat = category, layout = layout, settings = {}, name = name }
+        Keep.pages[#Keep.pages + 1] = P
+        Header(name)
     end
 
     -- greyed out while the parent's predicate says no
@@ -4330,10 +5346,38 @@ local function BuildOptions()
         if parent and init and init.SetParentInitializer then init:SetParentInitializer(parent, predicate) end
     end
 
+    -- (with sub-pages: a button to each, at the top)
+    if Settings.RegisterVerticalLayoutSubcategory then
+        Header("More Options")
+        for _, item in ipairs({
+            { "Style", "Map Style, Soft Edges, Edge Shape, and the Outlines style's lines." },
+            { "Zone Border", "The map cut to your zone's outline, and how it fits and follows the zone." },
+            { "Behavior", "Click Through, Follow Me, Fit Caves, Live Minimap, and what to hide while the map is open." },
+            { "Options Button", "The button on the map that opens the small panel." },
+        }) do
+            Button(item[1], "Open", function() Keep.OpenPage(item[1]) end, item[2])
+        end
+        Header("General")
+    end
     Button("Setup Wizard", "Open", function() Wizard.Open() end,
         "The map key and the main options in a few steps, with the map open to see each change.")
+    Button("Open on the Map", "Open", function() Keep.Preview() end,
+        "Closes this window and opens the map with its small options panel, to change the main options while you see them.")
+    -- the map key: the game's own key row (as in Keybindings) if this client lets addons use it, else a
+    -- button that waits for the next key pressed
+    local okKey = pcall(function()
+        local idx = C_KeyBindings and C_KeyBindings.GetBindingIndex and C_KeyBindings.GetBindingIndex("OVERLAYMAP_SHOW")
+        if not (idx and CreateKeybindingEntryInitializer) then error("no key rows") end
+        local init = CreateKeybindingEntryInitializer(idx, true)
+        if not init then error("no key row") end
+        P.layout:AddInitializer(init)
+    end)
+    if not okKey then
+        Button("Map Key", "Set Key", function() Keep.CatchKey() end,
+            "Click, then press the key (or Shift, Ctrl, Alt combination) that shows the map. Escape cancels.")
+    end
 
-    local overlayInit = Settings.CreateCheckbox(category, Register("overlay", "Overlay Mode"),
+    local overlayInit = Settings.CreateCheckbox(P.cat, Register("overlay", "Overlay Mode"),
         "One switch for an overlay map: the map fills the whole screen, see-through and click-through, "
         .. "with solid markers and large soft edges. It keeps its own Map Opacity, Marker Opacity, Marker Size, My Arrow, "
         .. "Style, Soft Edges, Shape, Click Through and Keep Opacity While Moving: what you change while it's "
@@ -4341,7 +5385,7 @@ local function BuildOptions()
         .. "while it's on.")
 
     Header("Map")
-    Settings.CreateDropdown(category, Register("mode", "Key"), function()
+    Settings.CreateDropdown(P.cat, Register("mode", "Key"), function()
         local container = Settings.CreateControlTextContainer()
         container:Add("hold", "Hold to show")
         container:Add("press", "Press to show or hide")
@@ -4367,10 +5411,10 @@ local function BuildOptions()
         0.1, 1, 0.05)
     Slider("markerSize", "Marker Size", "Size of the markers on the map, Questie's and OpenMap's icons too "
         .. "(on top of OpenMap's own Icon size).", 0.5, 2.5, 0.05)
-    Settings.CreateCheckbox(category, Register("onlyMe", "Only My Arrow"),
+    Settings.CreateCheckbox(P.cat, Register("onlyMe", "Only My Arrow"),
         "Hides every marker on the map (quests, vendors, Questie's and OpenMap's icons) except your own "
         .. "arrow. The map's picture stays.")
-    local arrowInit = Settings.CreateCheckbox(category, Register("arrowCustom", "My Arrow: Own Size & Opacity"),
+    local arrowInit = Settings.CreateCheckbox(P.cat, Register("arrowCustom", "My Arrow: Own Size & Opacity"),
         "Your arrow on the map at a size and opacity of its own, apart from the other markers. "
         .. "On the game's map (without OpenMap), the opacity is also your party's dots'.")
     for _, init in ipairs({
@@ -4381,8 +5425,10 @@ local function BuildOptions()
         if init and init.AddShownPredicate then init:AddShownPredicate(ArrowOwn) end
     end
 
-    Header("Style")
-    local styleInit = Settings.CreateDropdown(category, Register("style", "Map Style"), function()
+    Button("", "Reset Everything", function() StaticPopup_Show("OVERLAYMAP_RESET_ALL") end,
+        "Puts every Overlay Map option, on every page, back to its default.")
+    Page("Style")
+    local styleInit = Settings.CreateDropdown(P.cat, Register("style", "Map Style"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(STYLE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
@@ -4390,13 +5436,13 @@ local function BuildOptions()
         .. "like an old map (the soft edges don't apply then). Outlines (beta): the map's painting hidden, only "
         .. "white lines for cliffs, water and roads over a dark background (needs the Overlay Map: Outlines "
         .. "download). Made automatically from the game's terrain: some lines may be missing or wrong.")
-    local edgeInit = Settings.CreateDropdown(category, Register("edge", "Soft Edges"), function()
+    local edgeInit = Settings.CreateDropdown(P.cat, Register("edge", "Soft Edges"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(EDGE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
     end, "The map and its markers fade out towards the edges, like the overlay maps of other games. "
         .. "Standard style only.")
-    local shapeInit = Settings.CreateDropdown(category, Register("shape", "Edge Shape"), function()
+    local shapeInit = Settings.CreateDropdown(P.cat, Register("shape", "Edge Shape"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(SHAPE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
@@ -4409,8 +5455,8 @@ local function BuildOptions()
     Under(styleInit, Slider("outlineBack", "Background Opacity", "Outlines style: how dark the background "
         .. "behind the lines is. At 0%, only the lines over the world.", 0, 1, 0.05), OutlineStyle)
 
-    Header("Zone Border")
-    local zoneInit = Settings.CreateCheckbox(category, Register("zoneBorder",
+    Page("Zone Border")
+    local zoneInit = Settings.CreateCheckbox(P.cat, Register("zoneBorder",
         Zone.Installed() and "Zone Border" or "Zone Border (needs download)"),
         "Cuts the map to the outline of your zone or capital city, on top of the style and shape above "
         .. "(Torn Parchment too). Needs the Overlay Map: Zone Borders download (a separate addon). "
@@ -4420,12 +5466,12 @@ local function BuildOptions()
     -- (greyed out without the download)
     if zoneInit and zoneInit.AddModifyPredicate then zoneInit:AddModifyPredicate(Zone.Installed) end
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
-    for _, init in ipairs({
-        Settings.CreateCheckbox(category, Register("zoneSoft", "Soft Border"),
+    for i, init in ipairs({
+        Settings.CreateCheckbox(P.cat, Register("zoneSoft", "Soft Border"),
             "The zone fades in from its border. Off: cut sharp."),
         Slider("zoneDim", "Outside Your Zone", "How much of the rest of the map shows behind your zone, "
             .. "which stands out. At 0% it's hidden.", 0, 0.6, 0.05),
-        Settings.CreateDropdown(category, Register("zoneFitMode", "Fit Zone"), function()
+        Settings.CreateDropdown(P.cat, Register("zoneFitMode", "Fit Zone"), function()
             local container = Settings.CreateControlTextContainer()
             container:Add("off", "Off")
             container:Add("enter", "When Entering")
@@ -4434,51 +5480,63 @@ local function BuildOptions()
         end, "Zooms the map so all of your zone fits. When Entering: each time you enter a new zone or "
             .. "city (not if you zoomed the map yourself in the last 30 seconds, nor during a flight: when "
             .. "you land). When Entering or Opening: also every time the map opens, instead of Remember Zoom."),
-        Settings.CreateCheckbox(category, Register("zoneKeep", "Keep Outline Between Zones"),
+        Settings.CreateCheckbox(P.cat, Register("zoneKeep", NeedsOM("Keep Outline Between Zones")),
             "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the "
             .. "outline you had stays (the rest of the map at Outside Your Zone). Off: the whole map shows there."),
-        Slider("zoneWhole", "Whole Map When Zoomed Out", "With OpenMap: the whole map shows once you zoom "
+        Slider("zoneWhole", NeedsOM("Whole Map When Zoomed Out"), "With OpenMap: the whole map shows once you zoom "
             .. "out until your zone fills less than this much of the view (it comes back a little further in). "
             .. "Higher: the whole map sooner; lower: the outline stays further out.", 0.15, 0.85, 0.05),
-        Settings.CreateCheckbox(category, Register("zoneView", "Outline Where You Look"),
+        Settings.CreateCheckbox(P.cat, Register("zoneView", NeedsOM("Outline Where You Look")),
             "With OpenMap: the outline is for the zone in the middle of the view, so moving the map to "
             .. "another zone outlines that one (over the sea or between zones, the last one stays). "
             .. "Off: your zone is outlined, and the whole map shows while you look at another."),
     }) do
-        Under(zoneInit, init, ZoneOn)
+        -- (the last three need OpenMap: greyed out without it)
+        local om = i > 3
+        Under(zoneInit, init, om and function() return ZoneOn() and OpenMapLoaded() end or ZoneOn)
     end
 
-    Header("Behavior")
-    Settings.CreateCheckbox(category, Register("clickThrough", "Click Through"),
+    Page("Behavior")
+    Settings.CreateCheckbox(P.cat, Register("clickThrough", "Click Through"),
         "The mouse goes through the map to the world behind it, so you can click and turn your character "
         .. "with the right button over it. Markers still show their names. Hold Shift to drag and zoom the map. "
         .. "Overlay Mode turns this on.")
-    Settings.CreateCheckbox(category, Register("follow", "Follow Me"),
+    Settings.CreateCheckbox(P.cat, Register("follow", "Follow Me"),
         "Keeps the map centred on you while it's open, like the minimap. With the Zone Border and OpenMap it "
         .. "stays inside your zone: still while all of it fits, following you up to its edges when zoomed in. "
         .. "It holds still while the mouse is "
         .. "over the map (in Overlay Mode, over a marker, or with Shift held). Without OpenMap, zoom in "
         .. "with the mouse wheel to see it move: zoomed all the way out, the whole zone already fits.")
-    Settings.CreateCheckbox(category, Register("rememberZoom", "Remember Zoom"),
+    local fitInit = Settings.CreateCheckbox(P.cat, Register("fitPlaces", NeedsOM("Fit Caves")),
+        "Needs OpenMap, which draws the caves and mines out in the world. Entering one, the map zooms in till "
+        .. "the cave fills it, and back out when you leave (to your zone with Fit Zone and the Zone Border, else to the "
+        .. "zoom you had). Works with the Zone Border or without it.")
+    if fitInit and fitInit.AddModifyPredicate then fitInit:AddModifyPredicate(OpenMapLoaded) end
+    Settings.CreateCheckbox(P.cat, Register("liveMinimap", "Live Minimap in Dungeons"),
+        "Inside dungeons and raids the game doesn't let addons know where you are, so no map can show your "
+        .. "arrow there. With this on, the game's own minimap (which can) is shown big in the map's place, "
+        .. "with your arrow, your party and the layout around you. It shows the minimap's range around you, "
+        .. "not the whole dungeon (Dungeon Journal's or OpenMap's map of it does that).")
+    Settings.CreateCheckbox(P.cat, Register("rememberZoom", "Remember Zoom"),
         "Opens at the zoom the map had when you last closed it, apart from the normal map's. With OpenMap, "
         .. "OpenMap's own reopen option still decides where it's centred.")
-    Settings.CreateCheckbox(category, Register("noFade", "Keep Opacity While Moving"),
+    Settings.CreateCheckbox(P.cat, Register("noFade", "Keep Opacity While Moving"),
         "With this off, the map fades to half while you move, like the game's own map.")
-    Settings.CreateCheckbox(category, Register("hideMinimap", "Hide Minimap"),
+    Settings.CreateCheckbox(P.cat, Register("hideMinimap", "Hide Minimap"),
         "Hides the minimap while the map is open.")
 
     Header("Also Hide While the Map Is Open")
     for _, group in ipairs(HIDE_GROUPS) do
-        Settings.CreateCheckbox(category, Register(group.key, group.label),
+        Settings.CreateCheckbox(P.cat, Register(group.key, group.label),
             "Hidden while the map is open, and back when it closes.")
     end
-    Settings.CreateCheckbox(category, Register("hideNames", "Character Names"),
+    Settings.CreateCheckbox(P.cat, Register("hideNames", "Character Names"),
         "The names above players', NPCs' and pets' heads, hidden while the map is open and back as they "
         .. "were when it closes. The game doesn't allow changing them in combat: then they're hidden, or "
         .. "come back, when combat ends.")
 
-    Header("Options Button")
-    Settings.CreateDropdown(category, Register("buttonMode", "Options Button"), function()
+    Page("Options Button")
+    Settings.CreateDropdown(P.cat, Register("buttonMode", "Options Button"), function()
         local container = Settings.CreateControlTextContainer()
         container:Add("hover", "On hover")
         container:Add("show", "Always")
@@ -4486,7 +5544,7 @@ local function BuildOptions()
         return container:GetData()
     end, "The arrow button in the corner of the map, which opens a small panel with these options. "
         .. "On hover: it shows while the mouse is over the map.")
-    Settings.CreateDropdown(category, Register("buttonCorner", "Options Button Corner"), function()
+    Settings.CreateDropdown(P.cat, Register("buttonCorner", "Options Button Corner"), function()
         local container = Settings.CreateControlTextContainer()
         container:Add("TOPRIGHT", "Top right")
         container:Add("TOPLEFT", "Top left")
@@ -4505,11 +5563,414 @@ local function BuildOptions()
         options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(v)
             return string.format("%d", v)
         end)
-        Settings.CreateSlider(category, Register("buttonSize", "Options Button Size"), options,
+        Settings.CreateSlider(P.cat, Register("buttonSize", "Options Button Size"), options,
             "Size of the options button, in pixels.")
     end
 
+    ResetRow()
     Settings.RegisterAddOnCategory(category)
+end
+
+-- The main options (Options > AddOns > Overlay Map) on one page of Overlay Map's own, with tabs like the
+-- small panel's, and a search box that finds an option on any tab. Each option has a line of help beside it.
+-- (Keep.ListOptions is the game's own list of options, over several pages: used if this client can't show a
+-- page of an addon's own, or with Keep.USE_TABS off.)
+Keep.USE_TABS = true
+Keep.OPTION_TABS = { "General", "Markers", "Style", "Zone Border", "Behavior", "Hide While Open", "Options Button" }
+Keep.DESC = {
+    overlay = "One switch for an overlay map: the map fills the whole screen, see-through and click-through, with solid markers and large soft edges. It keeps its own opacities, marker size, style and edges: what you change while it's on stays with Overlay Mode.",
+    mode = "Hold: the map shows while you hold the key. Press: one press shows it, the next one hides it.",
+    scale = "Size of the map. Overlay Mode fills the screen instead.",
+    width = "Width of the map compared to its usual shape. Lower makes it more square.",
+    opacity = "How see-through the map itself is. At 0%, only the markers show, floating over the world.",
+    rememberZoom = "Opens at the zoom the map had when you last closed it, apart from the normal map's.",
+    noFade = "With this off, the map fades to half while you move, like the game's own map.",
+    pinOpacity = "How see-through the markers are: quests, vendors, flight points, your arrow and other addons' markers.",
+    markerSize = "Size of the markers, Questie's and OpenMap's icons too (on top of OpenMap's own Icon size).",
+    onlyMe = "Hides every marker on the map except your own arrow. The map's picture stays.",
+    arrowCustom = "Your arrow at a size and opacity of its own, apart from the other markers.",
+    arrowSize = "Size of your arrow on the map.",
+    arrowOpacity = "How see-through your arrow on the map is.",
+    style = "Standard: the map as it is. Torn Parchment: torn, burnt paper edges. Outlines (beta): only white lines for cliffs, water and roads over a dark background (needs the Overlay Map: Outlines download).",
+    edge = "The map and its markers fade out towards the edges, like other games' overlay maps. Standard style only.",
+    shape = "The shape the map fades into. With Soft Edges off, the map is cut sharp in that shape.",
+    outlineLines = "Outlines style: how strong the white lines are.",
+    outlineBack = "Outlines style: how dark the background behind the lines is. At 0%, only the lines.",
+    zoneBorder = "Cuts the map to the outline of your zone or city (inside a cave, the cave's). Needs the Overlay Map: Zone Borders download.",
+    zoneSoft = "The zone fades in from its border. Off: cut sharp.",
+    zoneDim = "How much of the rest of the map shows behind your zone. At 0% it's hidden.",
+    zoneFitMode = "Zooms the map so all of your zone fits: each time you enter a new zone, or also every time the map opens.",
+    zoneKeep = "With OpenMap: over the sea or land of no zone, the outline you had stays. Off: the whole map shows there.",
+    zoneWhole = "With OpenMap: the whole map shows once your zone fills less than this much of the view.",
+    zoneView = "With OpenMap: the outline is for the zone in the middle of the view, not the one you're in.",
+    clickThrough = "The mouse goes through the map to the world, so you can click and turn with it over the map. Markers still show their names. Hold Shift to drag and zoom the map.",
+    follow = "Keeps the map centred on you while it's open, like the minimap. It holds still while the mouse is over the map.",
+    fitPlaces = "Needs OpenMap. Entering a cave or mine, the map zooms in till the cave fills it, and back out when you leave.",
+    liveMinimap = "Inside dungeons the game hides where you are from addons. With this on, the game's own minimap (with your arrow) is shown big in the map's place.",
+    hideMinimap = "Hides the minimap while the map is open.",
+    hideNames = "The names above players', NPCs' and pets' heads, hidden while the map is open (in combat, once it ends).",
+    buttonMode = "The arrow button in the map's corner that opens the small panel: always, only with the mouse over the map, or never.",
+    buttonCorner = "The corner of the map the options button sits in.",
+    buttonOpacity = "How see-through the button is with the mouse over the map. At 0%, it only shows up close.",
+    buttonNearOpacity = "How see-through the button is with the mouse on it or right next to it.",
+    buttonSize = "Size of the options button, in pixels.",
+}
+
+function Keep.TabOptions()
+    local canvas = CreateFrame("Frame")
+    canvas:Hide()
+    category = Settings.RegisterCanvasLayoutCategory(canvas, "Overlay Map")
+    Settings.RegisterAddOnCategory(category)
+    local O = { rows = {}, tabs = {} }
+    Keep.options = O
+
+    canvas:SetScript("OnShow", function()
+        if not O.built then Keep.BuildTabs(canvas, O) end
+        Keep.RefreshOptions()
+    end)
+    canvas:SetScript("OnHide", function() GameTooltip:Hide() end)
+end
+
+function Keep.RefreshOptions()
+    local O = Keep.options
+    if not (O and O.built and O.canvas:IsVisible()) then return end
+    for _, f in ipairs(O.rows) do f:Refresh() end
+    O.Top()
+    O.Layout()
+end
+
+function Keep.NeedsOMName(name) return OpenMapLoaded() and name or (name .. " (needs OpenMap)") end
+
+function Keep.BuildTabs(canvas, O)
+    O.built, O.canvas = true, canvas
+    local GetMeta = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
+    -- top: title, version, search; then the buttons and the tabs
+    local title = canvas:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+    title:SetPoint("TOPLEFT", 16, -14)
+    title:SetText("Overlay Map")
+    local ver = canvas:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    ver:SetPoint("BOTTOMLEFT", title, "BOTTOMRIGHT", 8, 2)
+    ver:SetText(GetMeta and GetMeta(ADDON_NAME, "Version") or "")
+
+    local search = CreateFrame("EditBox", nil, canvas, "InputBoxTemplate")
+    search:SetSize(180, 22)
+    search:SetPoint("TOPRIGHT", -20, -14)
+    search:SetAutoFocus(false)
+    local hint = search:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("LEFT", 2, 0)
+    hint:SetText("Search options...")
+    search:SetScript("OnTextChanged", function(self)
+        O.query = self:GetText():lower():match("^%s*(.-)%s*$")
+        hint:SetShown(self:GetText() == "")
+        O.Layout()
+    end)
+    search:SetScript("OnEscapePressed", function(self)
+        self:SetText("")
+        self:ClearFocus()
+    end)
+    search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    O.search = search
+
+    local function TopButton(text, width, fn, tip)
+        local b = CreateFrame("Button", nil, canvas, "UIPanelButtonTemplate")
+        b:SetSize(width, 22)
+        b:SetText(text)
+        b:SetScript("OnClick", fn)
+        Keep.Tip(b, nil, tip)
+        return b
+    end
+    local wizard = TopButton("Setup Wizard", 120, function() Wizard.Open() end,
+        "The map key and the main options in a few steps, with the map open to see each change.")
+    wizard:SetPoint("TOPLEFT", 16, -48)
+    local preview = TopButton("Open on the Map", 130, function() Keep.Preview() end,
+        "Closes this window and opens the map with its small options panel, to change the main options while you see "
+        .. "them (the game doesn't let the map and this window be open together).")
+    preview:SetPoint("LEFT", wizard, "RIGHT", 6, 0)
+    local key = TopButton("Map Key", 150, function() Keep.CatchKey() end,
+        "Click, then press the key (or a Shift, Ctrl or Alt combination) that shows the map. Escape cancels.")
+    key:SetPoint("LEFT", preview, "RIGHT", 6, 0)
+    local resetAll = TopButton("Reset Everything", 130, function() StaticPopup_Show("OVERLAYMAP_RESET_ALL") end,
+        "Puts every Overlay Map option back to its default (asks first; your key stays).")
+    resetAll:SetPoint("TOPRIGHT", -20, -48)
+    function O.Top()
+        local k = Wizard.CurrentKey()
+        key:SetText("Map Key: " .. (k and Wizard.KeyText(k) or "|cffff8040none|r"))
+    end
+
+    -- tabs
+    local tabY = -82
+    local x = 16
+    for _, name in ipairs(Keep.OPTION_TABS) do
+        local b = CreateFrame("Button", nil, canvas)
+        local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t:SetPoint("CENTER")
+        t:SetText(name)
+        b:SetSize(t:GetStringWidth() + 20, 24)
+        b:SetPoint("TOPLEFT", x, tabY)
+        x = x + b:GetWidth() + 2
+        b.text = t
+        b.line = b:CreateTexture(nil, "ARTWORK")
+        b.line:SetColorTexture(1, 0.82, 0, 0.9)
+        b.line:SetHeight(2)
+        b.line:SetPoint("BOTTOMLEFT", 4, 0)
+        b.line:SetPoint("BOTTOMRIGHT", -4, 0)
+        b:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
+        b:GetHighlightTexture():SetAlpha(0.2)
+        b:SetScript("OnClick", function()
+            db.optionsTab = name
+            if O.search:GetText() ~= "" then O.search:SetText("") end
+            O.Layout()
+        end)
+        O.tabs[name] = b
+    end
+    local base = canvas:CreateTexture(nil, "ARTWORK")
+    base:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+    base:SetHeight(1)
+    base:SetPoint("TOPLEFT", 16, tabY - 24)
+    base:SetPoint("TOPRIGHT", -20, tabY - 24)
+    O.top = -(-tabY + 24 + 12)
+    if not tContains(Keep.OPTION_TABS, db.optionsTab) then db.optionsTab = "General" end
+
+    -- rows: a control on the left (CONTROL wide), its line of help on the right
+    local CONTROL = 300
+    local tab
+    local function Row(height, key, label, enabledIf)
+        local f = CreateFrame("Frame", nil, canvas)
+        f:SetSize(CONTROL, height)
+        f.height, f.tab, f.key, f.enabledIf = height, tab, key, enabledIf
+        f.Refresh = function() end
+        local desc = key and (Keep.DESC[key] or Keep.TIPS[key])
+        if desc then
+            f.desc = canvas:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            f.desc:SetJustifyH("LEFT")
+            f.desc:SetJustifyV("TOP")
+            f.desc:SetSpacing(2)
+            f.desc:SetText(desc)
+        end
+        f.search = ((label or "") .. " " .. (desc or "") .. " " .. tab):lower()
+        O.rows[#O.rows + 1] = f
+        return f
+    end
+    local function Check(key, label, enabledIf, offLabel, offTip)
+        PanelCheck(Row(26, key, label, enabledIf), key, label, enabledIf, offLabel, offTip)
+    end
+    local function Slider(key, label, minValue, maxValue, step, enabledIf, reshape, fmt)
+        PanelSlider(Row(40, key, label, enabledIf), key, label, minValue, maxValue, step, reshape, fmt)
+    end
+    local function Cycle(key, label, choices, enabledIf)
+        PanelCycle(Row(28, key, label, enabledIf), key, label, choices, enabledIf)
+    end
+    local function Buttons(list, enabledIf, label)
+        local f = Row(30, nil, label, enabledIf)
+        local w = (CONTROL - 20 - (#list - 1) * 6) / #list
+        local made = {}
+        for i, item in ipairs(list) do
+            local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            b:SetSize(w, 22)
+            b:SetPoint("TOPLEFT", 10 + (i - 1) * (w + 6), 0)
+            b:SetText(item[1])
+            b:SetScript("OnClick", item[2])
+            if item[3] then Keep.Tip(b, nil, item[3]) end
+            made[i] = b
+        end
+        f.Refresh = function() for _, b in ipairs(made) do b:SetEnabled(not enabledIf or enabledIf()) end end
+        return f
+    end
+    local function TabReset()
+        local name = tab
+        Buttons({ { "Reset This Tab", function() StaticPopup_Show("OVERLAYMAP_RESET_TAB", name, nil, name) end,
+            "Puts every option on this tab back to its default." } }).isReset = true
+    end
+    local function ZoneOn() return db.zoneBorder and Zone.Installed() end
+    local function ZoneOM() return ZoneOn() and OpenMapLoaded() end
+
+    tab = "General"
+    Check("overlay", "Overlay Mode (full screen)")
+    Cycle("mode", "Key", Wizard.MODE_CHOICES)
+    Slider("scale", "Size", 0.3, 2.5, 0.05, NotOverlay, true)
+    Slider("width", "Width", 0.5, 1.5, 0.05, NotOverlay, true)
+    Slider("opacity", "Map Opacity", 0, 1, 0.05)
+    Buttons({ { "Move the Map", function() ShowMover() end, "Shows a box the size of the map: drag it, then right-click it when done." },
+        { "Reset Position", function() db.x, db.y = 0, 0 if mover and mover:IsShown() then ShowMover() end ApplyLook() end,
+            "Puts the map back in the middle of the screen." } }, NotOverlay, "Move Reset Position")
+    Check("rememberZoom", "Remember Zoom")
+    Check("noFade", "Keep Opacity While Moving")
+    TabReset()
+
+    tab = "Markers"
+    Slider("pinOpacity", "Marker Opacity", 0.1, 1, 0.05)
+    Slider("markerSize", "Marker Size", 0.5, 2.5, 0.05)
+    Check("onlyMe", "Only My Arrow")
+    Check("arrowCustom", "My Arrow: Own Size & Opacity")
+    Slider("arrowSize", "My Arrow Size", 0.5, 3, 0.05, ArrowOwn)
+    Slider("arrowOpacity", "My Arrow Opacity", 0.1, 1, 0.05, ArrowOwn)
+    TabReset()
+
+    tab = "Style"
+    Cycle("style", "Style", STYLE_CHOICES)
+    Cycle("edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
+    Cycle("shape", "Edge Shape", SHAPE_CHOICES, StandardStyle)
+    Slider("outlineLines", "Lines Opacity", 0.1, 1, 0.05, OutlineStyle)
+    Slider("outlineBack", "Background Opacity", 0, 1, 0.05, OutlineStyle)
+    TabReset()
+
+    tab = "Zone Border"
+    Check("zoneBorder", "Zone Border", Zone.Installed, "Zone Border (needs download)",
+        "Zone Border needs the Overlay Map: Zone Borders addon, a separate download (from where you got "
+        .. "Overlay Map). Install it next to Overlay Map and restart the game.")
+    Check("zoneSoft", "Soft Border", ZoneOn)
+    Slider("zoneDim", "Outside Your Zone", 0, 0.6, 0.05, ZoneOn)
+    Cycle("zoneFitMode", "Fit Zone", Wizard.FIT_CHOICES, ZoneOn)
+    Check("zoneKeep", Keep.NeedsOMName("Keep Outline Between Zones"), ZoneOM)
+    Slider("zoneWhole", Keep.NeedsOMName("Whole Map When Zoomed Out"), 0.15, 0.85, 0.05, ZoneOM)
+    Check("zoneView", Keep.NeedsOMName("Outline Where You Look"), ZoneOM)
+    TabReset()
+
+    tab = "Behavior"
+    Check("clickThrough", "Click Through")
+    Check("follow", "Follow Me")
+    Check("fitPlaces", "Fit Caves", OpenMapLoaded, "Fit Caves (needs OpenMap)",
+        "Fit Caves needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
+    Check("liveMinimap", "Live Minimap in Dungeons")
+    TabReset()
+
+    tab = "Hide While Open"
+    Check("hideMinimap", "Minimap")
+    for _, group in ipairs(HIDE_GROUPS) do
+        Keep.DESC[group.key] = Keep.DESC[group.key] or "Hidden while the map is open, and back when it closes."
+        Check(group.key, group.label)
+    end
+    Check("hideNames", "Character Names")
+    TabReset()
+
+    tab = "Options Button"
+    Cycle("buttonMode", "Options Button", { { "hover", "On Hover" }, { "show", "Always" }, { "hide", "Hidden" } })
+    Cycle("buttonCorner", "Corner", { { "TOPRIGHT", "Top Right" }, { "TOPLEFT", "Top Left" },
+        { "BOTTOMRIGHT", "Bottom Right" }, { "BOTTOMLEFT", "Bottom Left" } })
+    Slider("buttonOpacity", "Opacity", 0, 1, 0.05)
+    Slider("buttonNearOpacity", "Opacity Up Close", 0, 1, 0.05)
+    Slider("buttonSize", "Size", 14, 48, 1, nil, nil, function(v) return string.format("%d", v + 0.5) end)
+    TabReset()
+
+    local none = canvas:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+    none:SetText("No option matches.")
+
+    -- the rows of the tab chosen, or every row the search finds (with its tab's name over each group)
+    O.headers = {}
+    local function Header(i, text, y)
+        local h = O.headers[i]
+        if not h then
+            h = canvas:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            O.headers[i] = h
+        end
+        h:ClearAllPoints()
+        h:SetPoint("TOPLEFT", 16, y)
+        h:SetText(text)
+        h:Show()
+        return h
+    end
+    function O.Layout()
+        local q = O.query ~= "" and O.query or nil
+        for name, b in pairs(O.tabs) do
+            local on = not q and name == db.optionsTab
+            b.text:SetFontObject(on and "GameFontNormal" or "GameFontDisable")
+            b.line:SetShown(on)
+        end
+        for _, h in ipairs(O.headers) do h:Hide() end
+        local y, lastTab, nh, found = O.top, nil, 0, false
+        local firstInGroup = true
+        local descX = 16 + CONTROL + 14
+        local descW = math.max(120, (canvas:GetWidth() or 600) - descX - 24)
+        for _, f in ipairs(O.rows) do
+            local shown
+            if q then shown = not f.isReset and f.search:find(q, 1, true) ~= nil
+            else shown = f.tab == db.optionsTab end
+            f:SetShown(shown)
+            if f.desc then f.desc:SetShown(shown) end
+            if shown then
+                found = true
+                if q and f.tab ~= lastTab then
+                    lastTab, nh = f.tab, nh + 1
+                    Header(nh, f.tab, y - 6)
+                    y = y - 24
+                    firstInGroup = true
+                end
+                -- (a faint line between options, and room around each, so each line of help reads as its own)
+                do
+                    if not f.sep then
+                        f.sep = canvas:CreateTexture(nil, "ARTWORK")
+                        f.sep:SetColorTexture(0.75, 0.55, 0.15, 0.18)
+                        f.sep:SetHeight(1)
+                    end
+                end
+                if f.sep then
+                    f.sep:ClearAllPoints()
+                    f.sep:SetPoint("TOPLEFT", canvas, "TOPLEFT", 16, y)
+                    f.sep:SetPoint("TOPRIGHT", canvas, "TOPRIGHT", -24, y)
+                    f.sep:SetShown(not firstInGroup)
+                end
+                f:ClearAllPoints()
+                if f.isReset then
+                    -- (at the bottom of the window, centred, away from the options so it isn't pressed by mistake;
+                    -- the line closes the tab's options)
+                    f:SetPoint("BOTTOM", canvas, "BOTTOM", 0, 14)
+                else
+                    f:SetPoint("TOPLEFT", canvas, "TOPLEFT", 4, y - 10)
+                end
+                local h = f.height
+                if f.desc then
+                    f.desc:ClearAllPoints()
+                    f.desc:SetPoint("TOPLEFT", canvas, "TOPLEFT", descX, y - 10)
+                    f.desc:SetWidth(descW)
+                    h = math.max(h, f.desc:GetStringHeight() + 4)
+                end
+                if not f.isReset then y = y - h - 12 end
+                firstInGroup = false
+            elseif f.sep then
+                f.sep:Hide()
+            end
+        end
+        none:ClearAllPoints()
+        none:SetPoint("TOPLEFT", 20, O.top - 8)
+        none:SetShown(q ~= nil and not found)
+    end
+    O.Top()
+end
+
+StaticPopupDialogs.OVERLAYMAP_RESET_TAB = {
+    text = "Put the options on the %s tab back to their defaults?",
+    button1 = YES or "Yes",
+    button2 = NO or "No",
+    OnAccept = function(_, name) Keep.ResetTab(name) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- A tab's options back to their defaults (Size and Width laid out again with the fade)
+function Keep.ResetTab(name)
+    local shape = false
+    for _, f in ipairs(Keep.options.rows) do
+        if f.tab == name and f.key and DEFAULTS[f.key] ~= nil then
+            if f.key == "scale" or f.key == "width" then shape = true end
+            db[f.key] = DEFAULTS[f.key]
+        end
+    end
+    if name == "General" then db.x, db.y = 0, 0 end
+    SyncOverlay()
+    if shape and compact then Zone.Reshape() else ApplyLook() end
+    Keep.RefreshAll()
+end
+
+local function BuildOptions()
+    if not Settings then return end
+    if Keep.USE_TABS and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
+        local ok, err = pcall(Keep.TabOptions)
+        if ok then return end
+        geterrorhandler()(err)
+    end
+    Keep.ListOptions()
 end
 
 local function OpenOptions()
@@ -4625,9 +6086,49 @@ function OverlayMap_Debug()
         end
         Say("Shown under the map: " .. (#list > 0 and table.concat(list, "; ") or "nothing"))
     end
+    do
+        local u0 = Zone.CaveHere()
+        Say("Caves and dungeons: " .. (db.fitPlaces and "on" or "off") .. "; "
+            .. (Zone.InDungeon() and ("in a dungeon, map " .. tostring(C_Map.GetBestMapForUnit("player")))
+                or u0 and "in a cave" or ("not in a cave" .. ((IsIndoors and IsIndoors()) and " (indoors)" or "")))
+            .. (Zone.caveKey and (", cave " .. Zone.caveKey .. ((Zone.caveKey < 0 and Zone.CaveShape(Zone.caveKey))
+                and (" (its own shape " .. Zone.CaveShape(Zone.caveKey) .. ")")
+                or (_G.OverlayMap_ZoneBordersCaves and " (box: no shape for it)"
+                    or " (box: the cave shapes of Zone Borders 1.1.0 aren't loaded)"))) or "")
+            .. (Zone.caveFor and ", cave fitted" or "") .. (Zone.dungeonFor and ", dungeon fitted" or ""))
+        local n = Zone.caveNote
+        if n then
+            local okV, _, _, z = pcall(function() return _G.OpenMapAPI.GetView() end)
+            Say(string.format("  last cave: %.0f s ago, %s, cave %s; zoom from %s, asked %s, took %s; now %s",
+                GetTime() - n.at, n.mine and "skipped (you zoomed yourself)" or (n.instant and "as the map opened" or "while open"),
+                n.size, tostring(n.from and string.format("%.2f", n.from)), tostring(n.ask and string.format("%.2f", n.ask)),
+                tostring(n.got and string.format("%.2f", n.got)), tostring(okV and z and string.format("%.2f", z))))
+        end
+    end
+    do
+        local v = _G.OpenMapDungeonView
+        local inside, kind = IsInInstance()
+        Say("OpenMap's dungeon map: " .. (v and string.format("there, shown %s, alpha %.2f, on %s, %.0fx%.0f",
+            tostring(v:IsShown()), v:GetAlpha(), v:GetParent() == Canvas() and "the map area" or tostring(v:GetParent() and v:GetParent():GetName()),
+            v:GetWidth(), v:GetHeight()) or "not made yet") .. "; in an instance: " .. tostring(inside) .. " " .. tostring(kind)
+            .. "; since opening: " .. ((Zone.dvLog and #Zone.dvLog > 0) and table.concat(Zone.dvLog, ", ") or "nothing"))
+    end
+    do
+        -- (what Overlay Map hid on the map's window and in the map area: other addons' frames among them)
+        local names = {}
+        for f in pairs(stopped) do
+            if #names >= 14 then break end
+            local w, h = f:GetSize()
+            local parent = f:GetParent()
+            names[#names + 1] = string.format("%s (%s, %.0fx%.0f)", f:GetName() or (f.GetDebugName and f:GetDebugName()) or "?",
+                parent == Map() and "window" or parent == Canvas() and "area" or "other", w or 0, h or 0)
+        end
+        Say("Hidden while open: " .. (#names > 0 and table.concat(names, "; ") or "nothing"))
+    end
     Say("Zone Borders download: " .. Zone.Status() .. (Zone.loadReason and (" (" .. tostring(Zone.loadReason) .. ")") or ""))
     if db.zoneBorder then
-        local info = Zone.zoneNow and C_Map.GetMapInfo(Zone.zoneNow)
+        local info = type(Zone.zoneNow) == "number" and C_Map.GetMapInfo(Zone.zoneNow)
+            or (Zone.zoneNow and { name = "a cave" })
         Say("Zone border: " .. (Zone.zoneNow and (Zone.zoneNow .. " " .. tostring(info and info.name)
             .. (Zone.zoneAnchor and string.format(", placed at %.0f, %.0f, %.0f x %.0f", Zone.zoneAnchor:GetLeft() or 0,
                 Zone.zoneAnchor:GetTop() or 0, Zone.zoneAnchor:GetWidth(), Zone.zoneAnchor:GetHeight()) or ""))
@@ -4687,7 +6188,9 @@ function OverlayMap_Debug()
     for i = 1, num do
         local name = (C_AddOns and C_AddOns.GetAddOnInfo or GetAddOnInfo)(i)
         local loaded = (C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded)(i)
-        if loaded and name and (name:lower():find("map") or name:lower():find("questie") or name:lower():find("coord")) then
+        local low = name and name:lower() or ""
+        if loaded and name and (low:find("map") or low:find("questie") or low:find("coord") or low:find("journal")
+            or low:find("dungeon")) then
             list[#list + 1] = name
         end
     end
@@ -4775,12 +6278,14 @@ events:SetScript("OnEvent", function(self, event, name)
         ExtrasEnterCombat()
     elseif event == "PLAYER_REGEN_ENABLED" then
         ExtrasLeaveCombat()
+        if Zone.shelved then Close() end -- (closed during combat: now for real)
         if Wizard.afterCombat then
             Wizard.afterCombat = nil
             Wizard.Open()
         end
     elseif event == "MODIFIER_STATE_CHANGED" then
         if compact and db.clickThrough then ApplyClickThrough() end
+        if Zone.live then Zone.LiveMinimap() end
     elseif event == "ADDON_LOADED" and name == ADDON_NAME then
         -- Settings from when the addon was called Quick Map (its saved file renamed to OverlayMap.lua
         -- in the WTF folder), taken over once.
