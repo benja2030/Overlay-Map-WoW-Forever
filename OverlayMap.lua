@@ -25,8 +25,8 @@ local DEFAULTS = {
     zoneBorder = false, -- the map cut to your zone's outline (on top of the shape and style)
     zoneSoft = true, -- the zone's outline faded in from the border (off: cut sharp)
     zoneDim = 0.3,   -- with the zone border: how much of the rest of the map shows (0: hidden; 5% steps)
-    zoneFit = true,  -- with the zone border: entering a new zone, the map zooms so it fits
-    zoneFitOpen = false, -- with the zone border: every time the map opens, zoomed to fit your zone
+    zoneFitMode = "enter", -- with the zone border, the map zoomed to fit your zone: "off", "enter" (each
+                           -- new zone you enter) or "open" (that, and every time the map opens)
     zoneView = false, -- with the zone border and OpenMap: the outline is the zone in the middle of the view
     zoneKeep = true, -- with the zone border and OpenMap: over the sea or land of no zone, the outline stays
     zoneWhole = 0.45, -- with the zone border and OpenMap: the whole map once the zone fills less of the view
@@ -1021,7 +1021,7 @@ end
 Zone.CITY_ZONE = { [1455] = 1426, [1456] = 1412, [1457] = 1438, [1458] = 1420 } -- Ironforge, Thunder Bluff, Darnassus, Undercity
 Zone.SAME_PLACE = { [1453] = 1429, [1454] = 1411 } -- Stormwind in Elwynn Forest, Orgrimmar in Durotar
 -- With OpenMap's whole world: a zone is outlined while it fills at least FILL_ON of the view (1: it
--- just fits; the Whole Map Zoomed Out option, db.zoneWhole), and keeps it until it fills less than
+-- just fits; the Whole Map When Zoomed Out option, db.zoneWhole), and keeps it until it fills less than
 -- FILL_OFF, 10% less (two values, so it doesn't switch back
 -- and forth at one). Below that (about two to three zones across), the next zone around it is
 -- tried (from a city, the zone it's in), and the whole map shows when none is big enough.
@@ -1181,7 +1181,7 @@ function Zone.Clamp(u, v, zoom)
     if not mine then return u, v end
     -- Kept inside the zone you're in, not the outline shown: entering a new zone, the outline takes
     -- half a second to change over, and until then the view followed you freely, then jumped back
-    -- (and fought the zoom of Fit Each New Zone, which centres on the new zone at once).
+    -- (and fought the zoom of Fit Zone, which centres on the new zone at once).
     -- (inside a city with its zone outlined, zoomed out: the zone's box, as shown)
     local box = (Zone.shown and Zone.Same(Zone.shown) == Zone.Same(mine)) and Zone.shown or mine
     local l, r, t, b = Zone.Box(box)
@@ -1953,6 +1953,17 @@ function Zone.Fit(zone, instant)
 end
 
 -- Whether you've entered a new zone since the map last looked (the first time, only noted)
+-- Your own zoom: a zoom of the map while no fit is under way (OpenMap's view, or the mouse wheel on
+-- the game's map), kept for KEEP_MY_ZOOM seconds against Fit Zone
+Zone.KEEP_MY_ZOOM = 30
+function Zone.NoteZoom(z)
+    if type(z) == "number" and Zone.lastZoom and math.abs(z - Zone.lastZoom) > Zone.lastZoom * 0.01
+        and not (Zone.fitUntil and GetTime() < Zone.fitUntil) and not settling then
+        Zone.zoomedAt = GetTime()
+    end
+    Zone.lastZoom = z
+end
+
 function Zone.CheckFit(instant)
     -- (on a flight, not each zone you fly over: the one you land in, once you land)
     if UnitOnTaxi("player") then return end
@@ -1960,7 +1971,9 @@ function Zone.CheckFit(instant)
     if not zone or zone == Zone.fittedFor then return end
     local first = Zone.fittedFor == nil
     Zone.fittedFor = zone
-    if first or not db.zoneFit or not db.zoneBorder or not Zone.Available() then return end
+    if first or db.zoneFitMode == "off" or not db.zoneBorder or not Zone.Available() then return end
+    -- (you zoomed the map yourself a moment ago: your zoom is kept)
+    if not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KEEP_MY_ZOOM then return end
     Zone.Fit(zone, instant)
 end
 
@@ -2516,6 +2529,7 @@ local function Restore()
     SaveZoom()
     compact = false
     Zone.Reset(true) -- (the outlines' pictures stay loaded for next time)
+    Zone.lastZoom, Zone.zoomedAt = nil, nil -- (your own zoom counts only while the map is open)
     local map = Map()
     RevealAll()
     ShowMinimap()
@@ -2584,7 +2598,7 @@ local function Open()
             if obj:GetAlpha() > 0 then obj:SetAlpha(0) end
         end
         RestoreZoom()
-        if db.zoneBorder and db.zoneFitOpen and Zone.PlayerZone() then
+        if db.zoneBorder and db.zoneFitMode == "open" and Zone.PlayerZone() then
             Zone.fittedFor = Zone.PlayerZone()
             Zone.Fit(Zone.fittedFor, true) -- (every time: fitted to your zone)
         else
@@ -2629,6 +2643,12 @@ local function HookMap()
         if map[method] then hooksecurefunc(map, method, Restore) end
     end
     -- The map's picture resized (another map under OpenMap's view): the outline laid again at once
+    -- (the mouse wheel on the game's map: your own zoom, kept against Fit Zone)
+    if map.ScrollContainer then
+        map.ScrollContainer:HookScript("OnMouseWheel", function()
+            if compact then Zone.zoomedAt = GetTime() end
+        end)
+    end
     local child = map.ScrollContainer and map.ScrollContainer.Child
     if child then
         child:HookScript("OnSizeChanged", function()
@@ -3147,7 +3167,7 @@ local function BuildPanel()
     Section("Style")
     PanelCycle(Row(24), "style", "Style", STYLE_CHOICES)
     PanelCycle(Row(24), "edge", "Soft Edges", EDGE_CHOICES, StandardStyle)
-    PanelCycle(Row(28), "shape", "Shape", SHAPE_CHOICES, StandardStyle)
+    PanelCycle(Row(28), "shape", "Edge Shape", SHAPE_CHOICES, StandardStyle)
     PanelSlider(Row(38, OutlineStyle), "outlineLines", "Lines Opacity", 0.1, 1, 0.05)
     PanelSlider(Row(38, OutlineStyle), "outlineBack", "Background Opacity", 0, 1, 0.05)
     Section("Zone Border")
@@ -3426,7 +3446,7 @@ local function BuildOptions()
         return container:GetData()
     end, "The map and its markers fade out towards the edges, like the overlay maps of other games. "
         .. "Standard style only.")
-    local shapeInit = Settings.CreateDropdown(category, Register("shape", "Soft Edges Shape"), function()
+    local shapeInit = Settings.CreateDropdown(category, Register("shape", "Edge Shape"), function()
         local container = Settings.CreateControlTextContainer()
         for _, c in ipairs(SHAPE_CHOICES) do container:Add(c[1], c[2]) end
         return container:GetData()
@@ -3455,17 +3475,22 @@ local function BuildOptions()
             "The zone fades in from its border. Off: cut sharp."),
         Slider("zoneDim", "Outside Your Zone", "How much of the rest of the map shows behind your zone, "
             .. "which stands out. At 0% it's hidden.", 0, 0.6, 0.05),
-        Settings.CreateCheckbox(category, Register("zoneFit", "Fit Each New Zone"),
-            "When you enter a new zone or city, the map zooms so all of it fits."),
-        Settings.CreateCheckbox(category, Register("zoneFitOpen", "Fit Your Zone When Opening"),
-            "Every time the map opens, it's zoomed so all of your zone fits (instead of Remember Zoom)."),
-        Settings.CreateCheckbox(category, Register("zoneKeep", "Keep the Outline Over No Zone"),
+        Settings.CreateDropdown(category, Register("zoneFitMode", "Fit Zone"), function()
+            local container = Settings.CreateControlTextContainer()
+            container:Add("off", "Off")
+            container:Add("enter", "When Entering")
+            container:Add("open", "When Entering or Opening")
+            return container:GetData()
+        end, "Zooms the map so all of your zone fits. When Entering: each time you enter a new zone or "
+            .. "city (not if you zoomed the map yourself in the last 30 seconds, nor during a flight: when "
+            .. "you land). When Entering or Opening: also every time the map opens, instead of Remember Zoom."),
+        Settings.CreateCheckbox(category, Register("zoneKeep", "Keep Outline Between Zones"),
             "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the "
             .. "outline you had stays (the rest of the map at Outside Your Zone). Off: the whole map shows there."),
-        Slider("zoneWhole", "Whole Map Zoomed Out", "With OpenMap: the whole map shows once you zoom out until "
-            .. "the outlined zone fills less than this much of the view (it comes back a little further in). "
+        Slider("zoneWhole", "Whole Map When Zoomed Out", "With OpenMap: the whole map shows once you zoom "
+            .. "out until your zone fills less than this much of the view (it comes back a little further in). "
             .. "Higher: the whole map sooner; lower: the outline stays further out.", 0.15, 0.85, 0.05),
-        Settings.CreateCheckbox(category, Register("zoneView", "Outline the Zone in View"),
+        Settings.CreateCheckbox(category, Register("zoneView", "Outline Where You Look"),
             "With OpenMap: the outline is for the zone in the middle of the view, so moving the map to "
             .. "another zone outlines that one (over the sea or between zones, the last one stays). "
             .. "Off: your zone is outlined, and the whole map shows while you look at another."),
@@ -3777,6 +3802,13 @@ events:SetScript("OnEvent", function(self, event, name)
                 t.shape, t.zoneBorder, t.zoneSoft = "rect", true, (t.edge or 0) > 0
             end
         end
+        -- (the two fit options are one now)
+        if db.zoneFitMode ~= "off" and db.zoneFitMode ~= "enter" and db.zoneFitMode ~= "open" then
+            if db.zoneFitOpen then db.zoneFitMode = "open"
+            elseif db.zoneFit == false then db.zoneFitMode = "off"
+            else db.zoneFitMode = "enter" end
+        end
+        db.zoneFit, db.zoneFitOpen = nil, nil
         if db.zoneViewOff == nil then db.zoneView, db.zoneViewOff = false, true end -- (a test version had it on)
         if not SHAPE_FILES[db.shape] then db.shape = DEFAULTS.shape end
         if db.zoneOutside == "hide" then db.zoneDim = 0 end -- (an earlier test's setting)
@@ -3803,6 +3835,10 @@ events:SetScript("OnEvent", function(self, event, name)
         local api = _G.OpenMapAPI
         if api and api.RegisterCallback then
             pcall(api.RegisterCallback, Zone, "OpenMap_ViewChanged", function()
+                if compact and api.GetView then
+                    local okV, _, _, z = pcall(api.GetView)
+                    if okV then Zone.NoteZoom(z) end
+                end
                 Zone.ViewMoved()
             end)
         end
