@@ -1721,6 +1721,7 @@ Zone.ForgetWalked = function() wipe(Zone.kids) end -- (now and then, for childre
 
 local function MaskTree(frame, depth, kind)
     if depth > 5 or frame:IsForbidden() then return end
+    Zone.Breathe()
     local count = frame:GetNumRegions()
     if count > 0 then
         local m = MaskFor(frame, kind)
@@ -1788,13 +1789,57 @@ local function WantShapeMask()
 end
 
 Zone.cost = { n = 0, ms = 0, since = 0 } -- (for /omap debug: how often the edges are laid, and the time)
-local function ApplyEdges(keepZone)
-    local t0 = debugprofilestop()
+-- Laying the edges can mean going through thousands of OpenMap's pictures (as the map opens, and
+-- when it shows new ones). Done all at once, that froze the game for a moment; it's now spread over
+-- frames, EDGE_BUDGET milliseconds each, while the map waits to fade in (Zone.walking).
+Zone.EDGE_BUDGET = 4
+function Zone.Breathe()
+    if Zone.co and coroutine.running() == Zone.co and debugprofilestop() - Zone.sliceAt > Zone.EDGE_BUDGET then
+        coroutine.yield()
+    end
+end
+Zone.driver = CreateFrame("Frame")
+Zone.driver:Hide()
+function Zone.Step()
+    local cost = Zone.cost
+    Zone.sliceAt = debugprofilestop()
+    local ok, err = coroutine.resume(Zone.co)
+    cost.ms = cost.ms + debugprofilestop() - Zone.sliceAt
+    if not ok then geterrorhandler()(err) end
+    if coroutine.status(Zone.co) == "dead" then
+        Zone.co, Zone.walking = nil, false
+        Zone.driver:Hide()
+        if Zone.again ~= nil then
+            local keep = Zone.again
+            Zone.again = nil
+            Zone.StartEdges(keep)
+        end
+    end
+end
+Zone.driver:SetScript("OnUpdate", function() if Zone.co then Zone.Step() else Zone.driver:Hide() end end)
+function Zone.StartEdges(keepZone)
     local cost = Zone.cost
     if GetTime() - cost.since > 10 then cost.n, cost.ms, cost.since = 0, 0, GetTime() end
     cost.n = cost.n + 1
-    Zone.ApplyEdgesNow(keepZone)
-    cost.ms = cost.ms + debugprofilestop() - t0
+    Zone.co = coroutine.create(function() Zone.ApplyEdgesNow(keepZone) end)
+    Zone.walking, Zone.walkStart = true, GetTime()
+    Zone.Step()
+    if Zone.co then Zone.driver:Show() end
+end
+local function ApplyEdges(keepZone)
+    if not compact then
+        -- (closing: done at once, and anything half done dropped)
+        Zone.co, Zone.again, Zone.walking = nil, nil, false
+        Zone.driver:Hide()
+        Zone.ApplyEdgesNow(keepZone)
+        return
+    end
+    if Zone.co then
+        -- (one under way: another pass after it; a full one wins over a "keep the zone" one)
+        Zone.again = (Zone.again == nil) and (keepZone and true or false) or (Zone.again and keepZone and true or false)
+        return
+    end
+    Zone.StartEdges(keepZone)
 end
 function Zone.ApplyEdgesNow(keepZone)
     if compact and not keepZone then Zone.UpdateZone() end
@@ -2016,7 +2061,9 @@ Watch = function()
     if not settling then Zone.CheckFit() end
     if not reshaping and math.abs(Canvas():GetScale() - WantScale()) > 0.001 then ApplySize() end -- (also a new screen size)
     -- (a fade left half-way, which nothing is finishing: the map shown again)
-    if not reshaping and not settling and transition < 1 and not fader:IsShown() then FadeTo(1, 0.2) end
+    -- (the map fades in once its edges are laid, or after a second whatever happens)
+    if not reshaping and not settling and transition < 1 and not fader:IsShown()
+        and (not Zone.walking or GetTime() - (Zone.walkStart or 0) > 1) then FadeTo(1, 0.2) end
     ApplyOpacity()
     if db.clickThrough then ApplyClickThrough() end -- (new markers, or something gave the mouse back)
     ApplyOnlyMe() -- (new markers)
