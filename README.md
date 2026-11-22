@@ -8,25 +8,25 @@ It uses the game's own map, so everything on it shows too: quests, vendors, flig
 
 ## What it does
 
-- **Hold or press**: the map shows while you hold the key, or one press shows it and the next hides it.
+- **Hold to show or toggle**: the map shows while you hold the key, or one press shows it and the next hides it.
 - **Size and width**: make the map bigger or smaller, and narrower (more square) or wider.
 - **Two opacities**: one for the map itself and one for the markers on it, so the map can fade into the background while quests and vendors stay clear. Hovering a marker shows its name, as on the normal map.
-- **Overlay mode**: one switch that makes the map fill the whole screen, see-through and click-through, with solid markers and large soft edges. The options panel then opens inside the map. It keeps its own look (opacities, marker size, style, soft edges, shape, click through), apart from the normal map's: change it while it's on, and the next time it's the same.
-- **Click through**: the mouse goes through the map to the world, so you can still click and turn your character with the right button over it. Markers still show their names; hold Shift to drag and zoom the map. Overlay mode turns it on.
-- **My arrow**: your arrow can have its own size and opacity, apart from the other markers.
+- **Full-screen overlay**: one switch that makes the map fill the whole screen, see-through and click-through, with solid markers and large soft edges. The options panel then opens inside the map. It keeps its own look (opacities, marker size, style, fade at the edges, shape, click through the map), apart from the normal map's: change it while it's on, and the next time it's the same.
+- **Click through the map**: the mouse goes through the map to the world, so you can still click and turn your character with the right button over it. Markers still show their names; hold Shift to drag and zoom the map. Full-screen overlay turns it on.
+- **Custom arrow size**: your arrow can have its own size and opacity, apart from the other markers.
 - **Markers only**: set the map's opacity to 0% and only the markers float over the world.
-- **Remember zoom**: opens at the zoom it had when you last closed it, apart from the normal map's.
-- **Only my arrow**: hides every marker except your own arrow.
+- **Open at last zoom**: opens at the zoom it had when you last closed it, apart from the normal map's.
+- **Show only my arrow**: hides every marker except your own arrow.
 - **Marker size**: bigger or smaller markers, from 50% to 250%.
-- **Soft edges**: the map fades out towards its edges, like the overlay maps of other games, in the shape of a rounded rectangle, a diamond or an oval (off, small, medium, large or very large).
-- **Zone border**: your zone stands out with its own outline (with OpenMap, the zone you're in), and the rest of the map fades behind it or hides. It goes on top of the map's shape and style, Torn Parchment included. The map can zoom to fit each new zone, and Follow me keeps the view inside your zone. Needs the separate **Overlay Map: Zone Borders** download.
-- **Torn Parchment style**: torn, burnt paper edges, like an old map, instead of the soft edges.
-- **Keep opacity while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
-- **Follow me**: keeps the map centred on you while it's open, like the minimap.
+- **Fade at the edges**: the map fades out towards its edges, like the overlay maps of other games, in the shape of a rounded rectangle, a diamond or an oval (off, small, medium, large or very large).
+- **Apply borders to zones**: your zone stands out with its own outline (with OpenMap, the zone you're in), and the rest of the map fades behind it or hides. It goes on top of the map's shape and style, Torn parchment included. **Auto-zoom to zone** fits the map to each new zone, and **Center on me** keeps the view inside your zone. Inside caves (with OpenMap), the cave's own shape. Needs the separate **Overlay Map: Zone Borders** download.
+- **Torn parchment style**: torn, burnt paper edges, like an old map, instead of the fade at the edges.
+- **Don't fade while moving**: the game fades its map while you move; Overlay Map keeps the opacity you chose (or fades to half, if you prefer).
+- **Center on me**: keeps the map centred on you while it's open, like the minimap.
 - **Hide the minimap** while the map is open (SexyMap's minimap too).
 - **Also hide** other parts of the interface while the map is open: action bars, player and target frames, chat, quest tracker, buffs, menu and bags, experience bar, and the names above characters' heads. Each one is its own option.
 - **Move it** anywhere on screen.
-- **Options button** in the corner of the map you choose, which opens a small panel to change all of this while you look at the map. It can show always, only with the mouse over the map, or never, at the opacity you choose.
+- **Panel button** in the corner of the map you choose, which opens a small panel to change all of this while you look at the map. It can show always, only with the mouse over the map, or never, at the opacity you choose.
 
 When the map closes, everything goes back exactly as it was: the normal map (M) is not changed at all.
 
