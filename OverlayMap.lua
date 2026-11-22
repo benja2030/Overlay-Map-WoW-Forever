@@ -207,10 +207,23 @@ local function AnchorCanvas()
     local c = Canvas()
     CoverScreen()
     c:ClearAllPoints()
-    local k = UIParent:GetEffectiveScale() / c:GetEffectiveScale()
+    local ue, ce = UIParent:GetEffectiveScale(), c:GetEffectiveScale()
     local x, y = db.x, db.y
     if db.overlay then x, y = 0, 0 end
-    c:SetPoint("CENTER", UIParent, "CENTER", x * k, y * k)
+    if pcall(c.SetPoint, c, "CENTER", UIParent, "CENTER", x * ue / ce, y * ue / ce) then return end
+    -- The game can refuse anchoring the map area to the screen ("anchor family connection": with some markers
+    -- or another addon's frames on the map, it counts as part of the map window's family): then to the map
+    -- window itself, its own parent, at the same place on the screen.
+    local p = c:GetParent()
+    local ux, uy = UIParent:GetCenter()
+    local px, py = p:GetCenter()
+    if not (ux and px) then return end
+    local pe = p:GetEffectiveScale()
+    local dx = ((ux + x) * ue - px * pe) / ce
+    local dy = ((uy + y) * ue - py * pe) / ce
+    if pcall(c.SetPoint, c, "CENTER", p, "CENTER", dx, dy) then return end
+    -- (refused too: back on its own anchors, where the game had it, rather than nowhere)
+    for _, pt in ipairs(before.points or {}) do pcall(c.SetPoint, c, unpack(pt)) end
 end
 
 local function Place()
@@ -847,13 +860,13 @@ function Zone.RaiseArrow(alpha)
     L:Show()
     if a:GetParent() ~= L then
         Zone.arrowFrame, Zone.arrowParent = a, a:GetParent()
-        Reparent(a, L, 2)
+        Keep.Reparent(a, L, 2)
     end
 end
 
 function Zone.LowerArrow()
     local a, parent = Zone.arrowFrame, Zone.arrowParent
-    if a and parent and a:GetParent() == Zone.arrowLayer then Reparent(a, parent, 2) end
+    if a and parent and a:GetParent() == Zone.arrowLayer then Keep.Reparent(a, parent, 2) end
     Zone.arrowFrame, Zone.arrowParent = nil, nil
     if Zone.arrowLayer then Zone.arrowLayer:Hide() end
 end
@@ -879,12 +892,17 @@ local function LoadLevels(f, levels, depth)
     end
 end
 
+-- (a protected marker, like your group's in combat, can't be moved by an addon then: left where it is, and
+-- false said, instead of an error)
 local function Reparent(f, parent, depth)
+    if InCombatLockdown() and f.IsProtected and f:IsProtected() then return false end
     local levels = {}
     SaveLevels(f, levels, depth)
-    f:SetParent(parent)
+    if not pcall(f.SetParent, f, parent) then return false end
     LoadLevels(f, levels, depth)
+    return true
 end
+Keep.Reparent = Reparent -- (for your arrow's layer, further up)
 
 local function MovePin(pin)
     if not hookedPins[pin] then
@@ -1040,15 +1058,23 @@ local function ApplyOpacity()
     layer:Show()
     if math.abs(viewLayer:GetAlpha() - db.pinOpacity * fade * pinFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * fade * pinFade) end
     viewLayer:Show()
-    for f in pairs(iconLayers) do
-        if f:GetParent() ~= viewLayer then
-            viewMoved[f] = true
-            Reparent(f, viewLayer, 5)
+    -- Going through every marker (with Questie, hundreds) is the costly part: only when there are new ones
+    -- (Keep.pinsDirty: the map acquired a marker, an option changed, the map opened) and once a second as a
+    -- safety net, not on every opacity change (a fade sets it every frame) nor on every upkeep. A marker the map
+    -- puts back on itself goes straight back to the layer anyway (MovePin's hook).
+    local now = GetTime()
+    if Keep.pinsDirty or now - (Keep.pinsAt or 0) >= 1 then
+        Keep.pinsDirty, Keep.pinsAt = false, now
+        for f in pairs(iconLayers) do
+            if f:GetParent() ~= viewLayer then
+                viewMoved[f] = true
+                Reparent(f, viewLayer, 5)
+            end
         end
-    end
-    for template, pool in pairs(map.pinPools or {}) do
-        if not MAP_ART[template] and pool.EnumerateActive then
-            for pin in pool:EnumerateActive() do MovePin(pin) end
+        for template, pool in pairs(map.pinPools or {}) do
+            if not MAP_ART[template] and pool.EnumerateActive then
+                for pin in pool:EnumerateActive() do MovePin(pin) end
+            end
         end
     end
     Zone.RaiseArrow(db.pinOpacity * fade * pinFade)
@@ -2958,10 +2984,16 @@ Watch = function()
     -- (the map fades in once its edges are laid, or after a second whatever happens)
     if not reshaping and not settling and transition < 1 and not fader:IsShown()
         and (not Zone.walking or GetTime() - (Zone.walkStart or 0) > 1) then FadeTo(1, 0.2) end
+    -- (the markers' click through, Show only my arrow and size: each kept by hooks the moment the game or an
+    -- addon changes them; gone through again for new markers, and once a second)
+    local fresh = Keep.markersDirty
     ApplyOpacity()
-    if db.clickThrough then ApplyClickThrough() end -- (new markers, or something gave the mouse back)
-    ApplyOnlyMe() -- (new markers)
-    ApplyMarkerSize() -- (new markers)
+    if slow or fresh then
+        Keep.markersDirty = false
+        if db.clickThrough then ApplyClickThrough() end
+        ApplyOnlyMe()
+        ApplyMarkerSize()
+    end
     if not slow then return end
     if not settling then
         -- (caves and dungeons, once a second; whether you're in a cave, for the zone border)
@@ -3438,6 +3470,7 @@ end
 local UpdateMapButton -- (the options button on the map, further down)
 
 ApplyLook = function()
+    Keep.pinsDirty, Keep.markersDirty = true, true -- (all the markers gone through again)
     Zone.CheckDownload() -- (Zone Border chosen without its download ready: asked, or told, at once)
     Outline.CheckDownload() -- (the same for the Outlines style)
     if not compact then return end
@@ -3853,11 +3886,15 @@ local function HookMap()
     if map.AcquirePin then
         local pending = false
         hooksecurefunc(map, "AcquirePin", function()
-            if compact then QueueEdges() end
+            if compact then
+                QueueEdges()
+                Keep.pinsDirty, Keep.markersDirty = true, true -- (a new marker: gone through at the next upkeep)
+            end
             if not compact or pending or not (layer and layer:IsShown()) then return end
             pending = true
             C_Timer.After(0, function()
                 pending = false
+                Keep.pinsDirty, Keep.markersDirty = true, true
                 if compact then ApplyOpacity() end
             end)
         end)
