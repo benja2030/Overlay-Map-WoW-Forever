@@ -27,6 +27,7 @@ local DEFAULTS = {
     zoneDim = 0.3,   -- with the zone border: how much of the rest of the map shows (0: hidden; 5% steps)
     zoneFitMode = "enter", -- with the zone border, the map zoomed to fit your zone: "off", "enter" (each
                            -- new zone you enter) or "open" (that, and every time the map opens)
+    keepZoomTime = 30, -- with Fit Zone: seconds your own zoom is kept before Fit Zone may zoom again (0: never kept)
     zoneView = false, -- with the zone border and OpenMap: the outline is the zone in the middle of the view
     zoneKeep = true, -- with the zone border and OpenMap: over the sea or land of no zone, the outline stays
     zoneWhole = 0.45, -- with the zone border and OpenMap: the whole map once the zone fills less of the view
@@ -116,11 +117,14 @@ local function ConcealAll()
     -- Zone.DungeonView)
     local fdj = _G.ForeverDungeonJournalFrame
     local fdjBack = fdj and fdj.dungeonMapPanel and fdj.dungeonMapPanel:GetParent()
+    -- (and its Dungeon Map / World Map button, in the map's corner: inside a dungeon it's the way back to the
+    -- dungeon's map, if you or the journal chose the world map)
+    local fdjToggle = _G.ForeverDungeonJournalWorldMapToggle
     for _, child in ipairs({ map:GetChildren() }) do
-        if child ~= map.BorderFrame and not owned[child] and child ~= fdjBack then Stop(child) end
+        if child ~= map.BorderFrame and not owned[child] and child ~= fdjBack and child ~= fdjToggle then Stop(child) end
     end
     for _, child in ipairs({ map:GetChildren() }) do
-        if child ~= fdjBack then Conceal(child) end
+        if child ~= fdjBack and child ~= fdjToggle then Conceal(child) end
     end
     -- Boxes other addons put inside the map area (a coordinates box, for example) are hidden;
     -- a frame covering the whole map area holds icons, so it stays.
@@ -1003,6 +1007,12 @@ local function ApplyOpacity()
     if Zone.live then
         mapAlpha = 0
         if Minimap and math.abs(Minimap:GetAlpha() - db.opacity * fade) > 0.001 then Minimap:SetAlpha(db.opacity * fade) end
+        -- (redrawn once it actually shows: while the map was still invisible as it opened, the minimap's redraw
+        -- was lost, and it showed black or blank from the second opening on)
+        if not Zone.live.drawn and db.opacity * fade > 0.05 then
+            Zone.live.drawn = true
+            C_Timer.After(0.05, function() if Zone.live then Zone.MinimapRedraw(0) end end)
+        end
     end
     if math.abs(map:GetAlpha() - mapAlpha) > 0.001 then map:SetAlpha(mapAlpha) end
     Outline.Apply(db.opacity * fade)
@@ -2309,8 +2319,8 @@ end
 
 -- Whether you've entered a new zone since the map last looked (the first time, only noted)
 -- Your own zoom: a zoom of the map while no fit is under way (OpenMap's view, or the mouse wheel on
--- the game's map), kept for KEEP_MY_ZOOM seconds against Fit Zone
-Zone.KEEP_MY_ZOOM = 30
+-- the game's map), kept against Fit Zone for Keep Your Zoom's seconds (db.keepZoomTime)
+function Zone.KeepMyZoom() return db.keepZoomTime or 30 end
 -- (only with the mouse over the map, as zooming yourself needs it there: OpenMap's own zoom changes, a
 -- glide still finishing, or another addon's, counted as yours too, and a cave went unfitted)
 function Zone.NoteZoom(z)
@@ -2330,7 +2340,7 @@ function Zone.CheckFit(instant)
     Zone.fittedFor = zone
     if first or db.zoneFitMode == "off" or not db.zoneBorder or not Zone.Available() then return end
     -- (you zoomed the map yourself a moment ago: your zoom is kept)
-    if not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KEEP_MY_ZOOM then return end
+    if not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KeepMyZoom() then return end
     Zone.Fit(zone, instant)
 end
 
@@ -2341,7 +2351,7 @@ end
 --   cave fills the view, as OpenMap lets you over a cave; walking out, back to your zone (Fit Zone) or
 --   to the zoom you had.
 -- Once per place you enter (your own zoom after that is kept), not on a flight. (A dungeon: not if you
--- zoomed the map yourself in the last 30 seconds; a cave always, as Fit Zone's pause kept it from fitting.)
+-- zoomed the map yourself a moment ago (Keep Your Zoom); a cave always, as Fit Zone's pause kept it from fitting.)
 Zone.CAVE_FILL = 0.9
 
 -- OpenMap's own map of a dungeon (WoW: Forever's game has none): a frame of its own over the map area,
@@ -2410,13 +2420,45 @@ Zone.unframed = {} -- object -> what it had
 -- Dungeon Journal lays its map out again whenever its window opens over the map (a quest or a boss
 -- clicked on it), and its frame came back: kept clear the moment it does, and the world's map under it
 -- hidden or back as its dungeon map comes and goes.
+-- Dungeon Journal switches to the world map on a right-click on its dungeon map (as the game's map zooms
+-- out). With Click Through, a right-click over the map is turning the camera: switched back to the dungeon's
+-- map at once (by its own button) when it happens that way. (Hold Shift to use the map: the right-click works.)
+-- Dungeon Journal goes to the world map on a right-click on its dungeon map (Shift held with Click Through).
+-- Inside a dungeon the world map is of no use: Overlay Map takes it straight back to the dungeon's map (its
+-- own Dungeon Map / World Map button still switches on purpose), and every opening starts on it.
+function Zone.JournalBack()
+    local ns = _G.ForeverDungeonJournal_NS
+    local toggle = _G.ForeverDungeonJournalWorldMapToggle
+    if not (compact and ns and ns.IsWorldMapOverlayAttached and toggle and toggle:IsShown()) then return end
+    if ns.IsWorldMapOverlayAttached() then return end
+    Zone.journalBack = true
+    toggle:Click()
+    Zone.journalBack = nil
+end
+
+function Zone.WatchRightPress()
+    if Zone.rightWatch then return end
+    Zone.rightWatch = CreateFrame("Frame")
+    pcall(Zone.rightWatch.RegisterEvent, Zone.rightWatch, "GLOBAL_MOUSE_DOWN")
+    Zone.rightWatch:SetScript("OnEvent", function(_, _, button)
+        if button == "RightButton" and compact then Zone.rightDownAt = GetTime() end
+    end)
+end
+
 function Zone.HookJournal()
+    Zone.WatchRightPress()
     local ns, fdj = _G.ForeverDungeonJournal_NS, _G.ForeverDungeonJournalFrame
     if Zone.journalHooked or not (ns and fdj) then return end
     Zone.journalHooked = true
     if type(ns.RefreshWorldMapOverlay) == "function" then
         hooksecurefunc(ns, "RefreshWorldMapOverlay", function()
             if not compact then return end
+            -- (gone to the world map right after a right-click: back to the dungeon's map)
+            if not Zone.journalBack and Zone.rightDownAt and GetTime() - Zone.rightDownAt < 1.5
+                and ns.IsWorldMapOverlayAttached and not ns.IsWorldMapOverlayAttached() then
+                Zone.rightDownAt = nil
+                C_Timer.After(0, Zone.JournalBack)
+            end
             if Zone.DungeonViewShown() then Zone.Unframe() else Zone.Reframe(Zone.InDungeon()) end
             ApplyOpacity() -- (the markers kept off it, at once)
         end)
@@ -2555,6 +2597,7 @@ function Zone.LiveMinimap()
             m:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx, cy)
             m:SetSize(side, side)
             Zone.MinimapRedraw(0)
+            Zone.live.drawn = false -- (and again once it's on screen: ApplyOpacity)
         end
     end
     -- (square, or the map's soft edges or torn parchment, as its cut; its own round one back after.
@@ -2592,6 +2635,18 @@ function Zone.MinimapRedraw(zoom)
     local other = (zoom > 0) and (zoom - 1) or math.min(1, m:GetZoomLevels() - 1)
     pcall(m.SetZoom, m, other)
     pcall(m.SetZoom, m, zoom)
+    -- (both steps in the same frame weren't always enough: in some dungeons it stayed blank until its zoom was
+    -- changed by hand. Again over the next frames, each step in a frame of its own)
+    Zone.redrawGen = (Zone.redrawGen or 0) + 1
+    local gen = Zone.redrawGen
+    C_Timer.After(0, function()
+        if gen ~= Zone.redrawGen then return end
+        pcall(m.SetZoom, m, other)
+        C_Timer.After(0.05, function()
+            if gen ~= Zone.redrawGen then return end
+            pcall(m.SetZoom, m, zoom)
+        end)
+    end)
 end
 
 function Zone.MinimapBack()
@@ -2826,7 +2881,7 @@ end
 -- force: as the map opens with Fit Zone on each opening, the cave fitted again over the zone
 function Zone.CheckPlaces(instant, force)
     if not db.fitPlaces or UnitOnTaxi("player") then return end
-    local mine = not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KEEP_MY_ZOOM
+    local mine = not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KeepMyZoom()
     if Zone.InDungeon() then
         Zone.caveFor, Zone.beforeCave = nil, nil
         local id = C_Map.GetBestMapForUnit("player") or Map():GetMapID()
@@ -2960,11 +3015,29 @@ end
 local passSaved = {} -- frame -> { click, motion, wheel } it had
 local SPLIT = UIParent.SetMouseClickEnabled ~= nil
 
+Zone.passNoHover = setmetatable({}, { __mode = "k" })
 local function PassFrames()
     local c = Canvas()
     local list = { c }
     if c.Child then list[#list + 1] = c.Child end
     for f in pairs(iconLayers) do list[#list + 1] = f end
+    -- (the dungeon maps too, Dungeon Journal's and OpenMap's: with Click Through they let the mouse through
+    -- like the rest of the map; Shift held gives it back, and a right-click then goes back to the world map,
+    -- as they intend)
+    local fdj = _G.ForeverDungeonJournalFrame
+    local back = fdj and fdj.dungeonMapPanel and fdj.dungeonMapPanel:GetParent()
+    local pieces = { _G.OpenMapDungeonView or false }
+    if fdj and back and back ~= fdj then
+        for _, f in ipairs({ back, fdj.dungeonMapPanel, fdj.dungeonMapCanvas or false, fdj.dungeonMapArtHolder or false }) do
+            pieces[#pieces + 1] = f
+        end
+    end
+    for _, f in ipairs(pieces) do
+        if f and f.IsMouseClickEnabled then
+            Zone.passNoHover[f] = true
+            list[#list + 1] = f
+        end
+    end
     return list
 end
 
@@ -3045,7 +3118,10 @@ ApplyClickThrough = function(force)
                 if f:IsMouseClickEnabled() then pcall(f.SetMouseClickEnabled, f, false) end
                 -- (an addon's icon layer that didn't notice the mouse is left so: covering the whole
                 -- map, it would take the hover from the markers under it, like Questie's)
-                if not f:IsMouseMotionEnabled() and not (iconLayers[f] and not passSaved[f][2]) then
+                if Zone.passNoHover[f] then
+                    -- (a dungeon's map: no hover either, nothing on it needs it there)
+                    if f:IsMouseMotionEnabled() then pcall(f.SetMouseMotionEnabled, f, false) end
+                elseif not f:IsMouseMotionEnabled() and not (iconLayers[f] and not passSaved[f][2]) then
                     pcall(f.SetMouseMotionEnabled, f, true)
                 end
             elseif f:IsMouseEnabled() then
@@ -3611,6 +3687,11 @@ local function Open()
             Zone.Unframe()
         end
         Zone.inCave = Zone.CaveHere() ~= nil -- (in a cave: no zone outline, see Zone.MaskZone)
+        -- (inside a dungeon: Dungeon Journal's map, even if it was left on the world map last time)
+        if Zone.InDungeon() then
+            Zone.HookJournal()
+            Zone.JournalBack()
+        end
         RestoreZoom()
         if db.zoneBorder and db.zoneFitMode == "open" and Zone.PlayerZone() then
             Zone.fittedFor = Zone.PlayerZone()
@@ -4940,7 +5021,7 @@ end
 StaticPopupDialogs.OVERLAYMAP_FOLLOW_FIT = {
     text = "Follow Me and Fit Zone together:\n\nentering a new zone, the map zooms so all of it fits, and "
         .. "while it fits Follow Me keeps it still, centred on the zone. Zoom in to have it follow you (up to "
-        .. "the zone's edges). If you zoom yourself, Fit Zone leaves your zoom alone for 30 seconds.",
+        .. "the zone's edges). If you zoom yourself, Fit Zone leaves your zoom alone for a while (Keep Your Zoom, in the options).",
     button1 = OKAY or "OK",
     timeout = 0,
     whileDead = true,
@@ -5478,7 +5559,7 @@ function Keep.ListOptions()
             container:Add("open", "When Entering or Opening")
             return container:GetData()
         end, "Zooms the map so all of your zone fits. When Entering: each time you enter a new zone or "
-            .. "city (not if you zoomed the map yourself in the last 30 seconds, nor during a flight: when "
+            .. "city (not if you zoomed the map yourself a moment before, see Keep Your Zoom, nor during a flight: when "
             .. "you land). When Entering or Opening: also every time the map opens, instead of Remember Zoom."),
         Settings.CreateCheckbox(P.cat, Register("zoneKeep", NeedsOM("Keep Outline Between Zones")),
             "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the "
@@ -5600,6 +5681,7 @@ Keep.DESC = {
     zoneSoft = "The zone fades in from its border. Off: cut sharp.",
     zoneDim = "How much of the rest of the map shows behind your zone. At 0% it's hidden.",
     zoneFitMode = "Zooms the map so all of your zone fits: each time you enter a new zone, or also every time the map opens.",
+    keepZoomTime = "After you zoom the map yourself, how long Fit Zone leaves your zoom alone before it fits a new zone again (with Follow Me, how long the view keeps your zoom). At 0, Fit Zone always fits.",
     zoneKeep = "With OpenMap: over the sea or land of no zone, the outline you had stays. Off: the whole map shows there.",
     zoneWhole = "With OpenMap: the whole map shows once your zone fills less than this much of the view.",
     zoneView = "With OpenMap: the outline is for the zone in the middle of the view, not the one you're in.",
@@ -5821,6 +5903,8 @@ function Keep.BuildTabs(canvas, O)
     Check("zoneSoft", "Soft Border", ZoneOn)
     Slider("zoneDim", "Outside Your Zone", 0, 0.6, 0.05, ZoneOn)
     Cycle("zoneFitMode", "Fit Zone", Wizard.FIT_CHOICES, ZoneOn)
+    Slider("keepZoomTime", "Keep Your Zoom", 0, 120, 5, function() return ZoneOn() and db.zoneFitMode ~= "off" end, nil,
+        function(v) return v < 0.5 and "Off" or string.format("%d s", v + 0.5) end)
     Check("zoneKeep", Keep.NeedsOMName("Keep Outline Between Zones"), ZoneOM)
     Slider("zoneWhole", Keep.NeedsOMName("Whole Map When Zoomed Out"), 0.15, 0.85, 0.05, ZoneOM)
     Check("zoneView", Keep.NeedsOMName("Outline Where You Look"), ZoneOM)
@@ -6104,6 +6188,41 @@ function OverlayMap_Debug()
                 n.size, tostring(n.from and string.format("%.2f", n.from)), tostring(n.ask and string.format("%.2f", n.ask)),
                 tostring(n.got and string.format("%.2f", n.got)), tostring(okV and z and string.format("%.2f", z))))
         end
+    end
+    do
+        -- (Dungeon Journal's dungeon map on the world map: lent or not, its button, and which pieces take clicks)
+        local ns, fdj = _G.ForeverDungeonJournal_NS, _G.ForeverDungeonJournalFrame
+        if ns and fdj then
+            local toggle = _G.ForeverDungeonJournalWorldMapToggle
+            local back = fdj.dungeonMapPanel and fdj.dungeonMapPanel:GetParent()
+            local parts = {}
+            for name, f in pairs({ back = back ~= fdj and back or nil, panel = fdj.dungeonMapPanel, canvas = fdj.dungeonMapCanvas,
+                art = fdj.dungeonMapArtHolder }) do
+                parts[#parts + 1] = string.format("%s %s%s", name, f:IsVisible() and "shown" or "hidden",
+                    f.IsMouseClickEnabled and (f:IsMouseClickEnabled() and ", clicks" or ", no clicks") or "")
+            end
+            Say("Dungeon Journal: dungeon " .. tostring(ns.CurrentDungeon and ns.CurrentDungeon()) .. ", on the map: "
+                .. tostring(ns.IsWorldMapOverlayAttached and ns.IsWorldMapOverlayAttached()) .. ", button: "
+                .. (toggle and toggle:IsShown() and ("\"" .. tostring(toggle:GetText()) .. "\"") or "none")
+                .. ", world map under it hidden: " .. tostring(Zone.underAlpha ~= nil) .. "; " .. table.concat(parts, "; "))
+        end
+    end
+    do
+        -- (Live Minimap in Dungeons: whether it's wanted, and where the minimap is)
+        local m = Minimap
+        local why = not db.liveMinimap and "option off" or not compact and "map closed" or not Zone.InDungeon() and "not in a dungeon"
+            or Zone.shelved and "map closed in combat" or (not Zone.live and InCombatLockdown()) and "waiting for combat to end" or nil
+        local where = "?"
+        if m then
+            local l, b, w, h = m:GetRect()
+            local p, rel = m:GetPoint(1)
+            where = string.format("shown %s, visible %s, alpha %.2f (on screen %.2f), %s %d, parent %s, at %s of %s, %.0f,%.0f %.0fx%.0f, scale %.2f (on screen %.2f), zoom %s",
+                tostring(m:IsShown()), tostring(m:IsVisible()), m:GetAlpha(), m:GetEffectiveAlpha(), m:GetFrameStrata(), m:GetFrameLevel(),
+                tostring(m:GetParent() and (m:GetParent():GetName() or "?")), tostring(p), tostring(rel and (rel.GetName and rel:GetName() or "?")),
+                l or -1, b or -1, w or 0, h or 0, m:GetScale(), m:GetEffectiveScale(), tostring(m.GetZoom and m:GetZoom()))
+        end
+        Say("Live minimap: " .. (Zone.live and "on the map" or ("not on the map (" .. tostring(why or "?") .. ")"))
+            .. (Zone.live and Zone.live.mask and (", mask " .. tostring(Zone.live.mask):match("[^\\]*$")) or "") .. "; minimap " .. where)
     end
     do
         local v = _G.OpenMapDungeonView
