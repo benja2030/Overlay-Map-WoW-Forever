@@ -17,7 +17,10 @@ local DEFAULTS = {
     onlyMe = false,  -- hide every marker except your own arrow
     arrowCustom = false, -- your own arrow at its own size and opacity (below)
     arrowSize = 1, arrowOpacity = 1,
-    noFade = true,   -- keep that opacity while moving (the game fades the map while you move)
+    arrowNoFade = false, -- your arrow (and your party's) not faded with the map while you move (Fade while moving)
+    moveFade = 0,    -- how much the map fades while you move (0: not at all, to 0.9)
+    moveFadeHover = true, -- Fade while moving: the map solid again with the mouse over it
+    moveFadeMarkers = false, -- Fade while moving: the markers fade with the map (off: only the map, as Map opacity)
     hideMinimap = true, -- hide the minimap while the map is open
     follow = false,  -- keep the map centred on you while it's open, like the minimap
     edge = 2,        -- soft edges, like an overlay map: 0 off, 1 small ... 4 very large
@@ -37,6 +40,8 @@ local DEFAULTS = {
     outlineBack = 0.6, -- Outlines style: the dark background's opacity
     rememberZoom = true, -- open at the zoom Overlay Map's map had when it last closed
     fitPlaces = true, -- caves (with OpenMap) and dungeons: zoomed to fit as you enter them
+    fitTowns = true, -- towns (with OpenMap): zoomed in on as you enter them (a town: an innkeeper or flight master)
+    townSize = 400,  -- Auto-zoom towns: how many yards across the view shows
     liveMinimap = false, -- inside dungeons: the game's own minimap, big, in the map's place (with your arrow)
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
     overlay = false, -- overlay mode: big, in the middle, see-through, soft edges
@@ -825,7 +830,9 @@ SyncLayer = function()
     end
     if viewLayer then Sync(viewLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 1) end
     if layer then Sync(layer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 2) end
+    if Zone.outLayer then Sync(Zone.outLayer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 2) end
     if Zone.arrowLayer then Sync(Zone.arrowLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3) end
+    if Zone.arrowPinLayer then Sync(Zone.arrowPinLayer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3) end
 end
 
 -- OpenMap draws your arrow on its icon layer, which goes under the markers' layer (Questie's icons
@@ -847,7 +854,29 @@ function Zone.FindArrow()
     end
 end
 
+-- The game's arrow (a marker, placed on the map's zoomed content, not on OpenMap's icon layer) with "My arrow
+-- doesn't fade": a layer of its own like the markers' (the content's scale: on the icons' arrow layer, at the
+-- canvas's scale, it was drawn in the wrong place), over them, not faded while you move
+function Zone.ArrowPinLayer()
+    if not Zone.arrowPinLayer then
+        Zone.arrowPinLayer = CreateFrame("Frame", "OverlayMapArrowMarker", UIParent)
+        Zone.arrowPinLayer:SetClipsChildren(true)
+        Sync(Zone.arrowPinLayer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3)
+    end
+    return Zone.arrowPinLayer
+end
+
 function Zone.RaiseArrow(alpha)
+    local P = Zone.arrowPinLayer
+    if P then
+        if P:GetNumChildren() > 0 and compact then
+            Sync(P, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3)
+            if math.abs(P:GetAlpha() - alpha) > 0.001 then P:SetAlpha(alpha) end
+            P:Show()
+        else
+            P:Hide()
+        end
+    end
     local a = Zone.FindArrow()
     if not a then return end
     if not Zone.arrowLayer then
@@ -869,6 +898,7 @@ function Zone.LowerArrow()
     if a and parent and a:GetParent() == Zone.arrowLayer then Keep.Reparent(a, parent, 2) end
     Zone.arrowFrame, Zone.arrowParent = nil, nil
     if Zone.arrowLayer then Zone.arrowLayer:Hide() end
+    if Zone.arrowPinLayer then Zone.arrowPinLayer:Hide() end
 end
 
 -- A new parent puts a frame, and the frames inside it, at new frame levels. Inside OpenMap's
@@ -910,19 +940,23 @@ local function MovePin(pin)
         -- The map puts its markers back on itself whenever it places them again (zooming,
         -- new markers); while Overlay Map shows it, they go straight back to the layer.
         hooksecurefunc(pin, "SetParent", function(self, parent)
-            if reparenting or not compact or not moved[self] or parent == layer then return end
+            if reparenting or not compact or not moved[self] then return end
+            local want = Zone.PinLayer(self)
+            if parent == want then return end
             reparenting = true
-            Reparent(self, layer, 2)
+            Reparent(self, want, 2)
             reparenting = false
         end)
     end
-    if pin:GetParent() ~= layer then
+    local want = Zone.PinLayer(pin)
+    if pin:GetParent() ~= want then
         -- A new parent resets a frame's level, which would put the marker under the map
         -- (out of reach of the mouse, so no tooltip); it keeps the level the map gave it.
         moved[pin] = true
         reparenting = true
-        Reparent(pin, layer, 2)
+        Reparent(pin, want, 2)
         reparenting = false
+        Zone.Unzone(pin, 2)
     end
 end
 
@@ -933,6 +967,9 @@ local function ReturnPins()
     reparenting = false
     wipe(moved)
     if layer then layer:Hide() end
+    if Zone.outLayer then Zone.outLayer:Hide() end
+    Zone.OMPinsApply(1)
+    Zone.omKey = nil
     local c = Canvas()
     for f in pairs(viewMoved) do
         Reparent(f, c, 5)
@@ -998,9 +1035,9 @@ local FadeTo -- (below)
 
 local function ApplyOpacity()
     local map = Map()
-    -- The game fades the map while you move; Overlay Map does it itself (to half) when
-    -- "Don't fade while moving" is off, so it works with these opacities.
-    local fade = (not db.noFade and IsPlayerMoving and IsPlayerMoving()) and 0.5 or 1
+    -- The game fades the map while you move; Overlay Map does it itself ("Fade while moving",
+    -- Keep.MoveFade), so it works with these opacities.
+    local fade = Keep.moveFaded or 1
     if settling or Zone.shelved then fade = 0 end
     -- (opening: hidden until the edges are laid, so the map isn't seen uncut for a moment, then a
     -- quick fade in; a second at most)
@@ -1018,6 +1055,9 @@ local function ApplyOpacity()
     fade = fade * transition
     -- (the setup wizard's key step: the map faint until you press the key you chose)
     if Wizard.dimNow then fade = fade * Wizard.dimNow end
+    -- (the markers: without the fade while moving, unless "Fade markers too", as Map opacity leaves them)
+    local markFade = fade
+    if not db.moveFadeMarkers and (Keep.moveFaded or 1) > 0.01 then markFade = fade / (Keep.moveFaded or 1) end
     local mapAlpha = db.opacity * fade
     -- (Outlines: the map's painting hidden, the lines drawn on their own layer, the markers on theirs)
     if db.style == "outlines" then mapAlpha = 0 end
@@ -1038,8 +1078,10 @@ local function ApplyOpacity()
     -- (the same opacity: the markers stay on the map. Not with an addon's icon layer, like OpenMap's:
     -- on the map it's over the markers, so its icons covered your arrow, which is the game's marker
     -- when OpenMap doesn't draw its own; on Overlay Map's layers your arrow goes over them)
-    if math.abs(db.pinOpacity - db.opacity) < 0.001 and db.style ~= "outlines" and not next(iconLayers) then
+    if math.abs(db.pinOpacity - db.opacity) < 0.001 and db.style ~= "outlines" and not next(iconLayers)
+        and not (db.zoneBorder and Zone.zoneNow) and not ((db.moveFade or 0) > 0 and not db.moveFadeMarkers) then
         if next(moved) then ReturnPins() end
+        if next(Zone.omFaded) or next(Zone.omLinesFaded) then Zone.OMPinsApply(1) Zone.omKey = nil end
         return
     end
     if not layer then
@@ -1054,9 +1096,22 @@ local function ApplyOpacity()
     -- (over OpenMap's dungeon map: the world's markers underneath kept off it)
     -- (also while inside a dungeon its map is only away in the journal's window for a moment)
     local pinFade = (Zone.live or Zone.DungeonViewShown() or (Zone.underAlpha ~= nil and Zone.InDungeon())) and 0 or 1
-    if math.abs(layer:GetAlpha() - db.pinOpacity * fade * pinFade) > 0.001 then layer:SetAlpha(db.pinOpacity * fade * pinFade) end
+    if math.abs(layer:GetAlpha() - db.pinOpacity * markFade * pinFade) > 0.001 then layer:SetAlpha(db.pinOpacity * markFade * pinFade) end
     layer:Show()
-    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * fade * pinFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * fade * pinFade) end
+    -- (markers outside the zone's border: at the rest of the map's visibility; hidden at 0%, so they don't
+    -- show their names under the mouse either)
+    if Zone.outLayer then
+        local out = db.pinOpacity * markFade * pinFade * Zone.OutsideShare()
+        if math.abs(Zone.outLayer:GetAlpha() - out) > 0.001 then Zone.outLayer:SetAlpha(out) end
+        Zone.outLayer:SetShown(out > 0.02)
+    end
+    -- (OpenMap's own icons outside the border: the same, Zone.OMPinLook; again when the zone or the visibility
+    -- changes, else with the markers below)
+    Zone.HookOMPins()
+    local share = Zone.OutsideShare()
+    local omKey = tostring(Zone.zoneNow) .. " " .. share
+    if Zone.omKey ~= omKey then Zone.omKey = omKey Zone.OMPinsApply(share) end
+    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * markFade * pinFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * markFade * pinFade) end
     viewLayer:Show()
     -- Going through every marker (with Questie, hundreds) is the costly part: only when there are new ones
     -- (Keep.pinsDirty: the map acquired a marker, an option changed, the map opened) and once a second as a
@@ -1076,8 +1131,13 @@ local function ApplyOpacity()
                 for pin in pool:EnumerateActive() do MovePin(pin) end
             end
         end
+        Zone.OMWalkLayers()
+        Zone.OMPinsApply(share)
     end
-    Zone.RaiseArrow(db.pinOpacity * fade * pinFade)
+    -- ("My arrow doesn't fade": without the fade while moving, the other fades kept)
+    local arrowFade = markFade
+    if db.arrowNoFade and (Keep.moveFaded or 1) > 0.01 then arrowFade = fade / (Keep.moveFaded or 1) end
+    Zone.RaiseArrow(db.pinOpacity * arrowFade * pinFade)
 end
 
 local function RestoreOpacity()
@@ -1638,7 +1698,288 @@ function Zone.Goal()
 end
 
 function Zone.SetNow()
+    local was = Zone.zoneNow
     Zone.zoneNow = (Zone.shown and Zone.level and Zone.level < 100) and Zone.shown or nil
+    if was ~= Zone.zoneNow then Keep.pinsDirty = true end
+end
+
+-- How much of the outside of the zone shows (the rest of the map's visibility): 1 without a zone border
+function Zone.OutsideShare()
+    if not (db.zoneBorder and Zone.zoneNow) then return 1 end
+    return math.max(0, math.min(1, (Zone.level or 0) / 100))
+end
+
+-- Which layer a marker goes on: the markers' layer, or (with a zone border, a marker whose spot is outside the
+-- zone) the outside layer. Its spot: the middle of the marker, on the map shown, into the world, and the zone
+-- there (as deep as the game's maps go). Kept per marker until it, the map shown or the zone changes.
+Zone.pinWhere = setmetatable({}, { __mode = "k" })
+-- A stretch of a Questie path (Questie's own drawing of it, a frame of type "line"), or a frame inside one
+function Zone.IsPath(f)
+    if f.type == "line" then return true end
+    local parent = f:GetParent()
+    return parent ~= nil and parent.type == "line"
+end
+
+function Zone.PinLayer(pin)
+    -- (the game's arrow (your party's dots with it: one marker), with "My arrow doesn't fade": on the arrow's
+    -- layer, which isn't faded while you move)
+    if db.arrowNoFade and pin.pinTemplate == "GroupMembersPinTemplate" then return Zone.ArrowPinLayer() end
+    if not (db.zoneBorder and Zone.zoneNow) then return layer end
+    -- (a path's marker always on the markers' layer, cut by the border there: Zone.pathsOnly. On the outside
+    -- layer, all of it would go, the part inside your zone too)
+    if pin.icon and pin.icon.type == "line" then return layer end
+    if not Zone.outLayer then
+        Zone.outLayer = CreateFrame("Frame", "OverlayMapMarkersOutside", UIParent)
+        Zone.outLayer:SetClipsChildren(true)
+        SyncLayer()
+    end
+    return Zone.PinOutside(pin) and Zone.outLayer or layer
+end
+
+function Zone.PinOutside(pin)
+    local content = Content()
+    local seen = Zone.pinWhere[pin]
+    -- (where it's drawn: Questie's icon, which OpenMap may move off its marker to the right spot for WoW:
+    -- Forever, else the marker. A marker on the hidden outside layer has no place on screen: then it keeps
+    -- the side it was on, or it went back and forth every second, flickering)
+    local spot = (pin.icon and pin.icon.GetCenter) and pin.icon or pin
+    local x, y = spot:GetCenter()
+    local cl, ct = content:GetLeft(), content:GetTop()
+    local cw, ch = content:GetSize()
+    if not (x and cl and cw and cw > 0 and ch > 0) then return seen and seen.out or false end
+    local pe, ce = spot:GetEffectiveScale(), content:GetEffectiveScale()
+    local nx = (x * pe - cl * ce) / (cw * ce)
+    local ny = (ct * ce - y * pe) / (ch * ce)
+    local host = Map():GetMapID()
+    local key = string.format("%s %.4f %.4f %s", tostring(host), nx, ny, tostring(Zone.zoneNow))
+    if seen and seen.key == key then return seen.out end
+    local out = false
+    local hl, hr, ht, hb = Zone.WorldRect(host)
+    if hl then out = Zone.WorldOutside(hl + nx * (hr - hl), ht + ny * (hb - ht)) end
+    Zone.pinWhere[pin] = { key = key, out = out }
+    return out
+end
+
+-- Whether a point of OpenMap's world is inside a zone's outline as it's drawn (ZoneGrid.lua: the outline's
+-- picture as a grid). The game's own zone lines don't follow the painted outline: Dun Algaz is Wetlands to
+-- the game, past the bottom of Wetlands' painted map, so its markers showed outside the border.
+Zone.gridRows = {}
+Zone.GRID_VALUE = {}
+do
+    local al = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    for i = 1, #al do Zone.GRID_VALUE[al:byte(i)] = i - 1 end
+end
+function Zone.InOutline(id, u, v)
+    local grid = _G.OverlayMapZoneGrid
+    local data = grid and grid[id]
+    if not data then return nil end
+    local l, r, t, b = Zone.WorldRect(id)
+    if not l then return nil end
+    local fx, fy = (u - l) / (r - l), (v - t) / (b - t)
+    if fx < 0 or fx >= 1 or fy < 0 or fy >= 1 then return false end
+    local rows = Zone.gridRows[id]
+    if not rows then
+        rows = {}
+        for row in data:gmatch("[^,]+") do rows[#rows + 1] = row end
+        Zone.gridRows[id] = rows
+    end
+    local row = rows[math.floor(fy * #rows) + 1]
+    if not row then return false end
+    local col, at, inside = math.floor(fx * 128), 0, false
+    for i = 1, #row do
+        at = at + (Zone.GRID_VALUE[row:byte(i)] or 0)
+        if col < at then return inside end
+        inside = not inside
+    end
+    return false
+end
+
+-- The other outlines that count as the same place (a capital and the zone it's in)
+Zone.partners = {}
+function Zone.Partners(id)
+    local list = Zone.partners[id]
+    if list then return list end
+    list = {}
+    for other in pairs(_G.OverlayMapZoneGrid or {}) do
+        if other ~= id and Zone.Same(other) == Zone.Same(id) then list[#list + 1] = other end
+    end
+    Zone.partners[id] = list
+    return list
+end
+
+-- A point of OpenMap's world outside the zone's border (in a cave: outside its box). Inside: within the
+-- zone's outline as drawn (or a capital's in it), or in a cave of the zone's (its quests are there, past the
+-- painted outline). Without the grid (an older Overlay Map file list), the game's own zone lines.
+function Zone.WorldOutside(u, v)
+    if type(Zone.zoneNow) == "string" then
+        local l, r, t, b = Zone.WorldRect(Zone.zoneNow)
+        return l and (u < l or u > r or v < t or v > b) or false
+    end
+    local inOutline = Zone.InOutline(Zone.zoneNow, u, v)
+    if inOutline ~= nil then
+        if inOutline then return false end
+        for _, id in ipairs(Zone.Partners(Zone.zoneNow)) do
+            if Zone.InOutline(id, u, v) then return false end
+        end
+        if not Zone.CaveKeyAt(u, v) then return true end
+    end
+    local zone = Zone.Outlined(Zone.DeepestAt(u, v))
+    return not zone or Zone.Same(zone) ~= Zone.Same(Zone.zoneNow)
+end
+
+-- OpenMap's own icons (its quest "!" and "?", flight masters, dungeons, boats, your pins ...): on its icon layer,
+-- not among the map's markers, so the outside layer never had them. Each knows its spot in the world (u, v).
+-- Outside the zone's border: at the rest of the map's visibility, and at 0% unseen and out of the mouse's
+-- reach. Only with a zone border; anything else (no border, the map closed) puts them back as OpenMap had them.
+Zone.omPins = setmetatable({}, { __mode = "k" })  -- every one of OpenMap's icons seen
+Zone.omFaded = setmetatable({}, { __mode = "k" }) -- the ones changed here
+-- (hidden at 0%, not made to ignore the mouse: click-through already switches their clicks, and the two fought.
+-- One OpenMap hides itself, back to its pool, isn't Overlay Map's any more: shown again here, it came back as
+-- a stray icon in an old spot)
+function Zone.OMPinHidden(pin)
+    if Zone.omHiding then return end
+    Zone.omFaded[pin], pin.omHidden = nil, nil
+    pin:SetAlpha(1)
+end
+
+function Zone.OMPinLook(pin, share)
+    local out = false
+    if share < 1 and type(pin.u) == "number" and type(pin.v) == "number" then
+        if pin.omU == pin.u and pin.omV == pin.v and pin.omZone == Zone.zoneNow and pin.omGen == Zone.omGen then
+            out = pin.omOut
+        else
+            out = Zone.WorldOutside(pin.u, pin.v) and true or false
+            pin.omU, pin.omV, pin.omZone, pin.omOut, pin.omGen = pin.u, pin.v, Zone.zoneNow, out, Zone.omGen
+        end
+    end
+    if out then
+        if not Zone.omFaded[pin] then
+            if not pin:IsShown() then return end -- (one OpenMap keeps hidden: left so)
+            Zone.omFaded[pin] = true
+            if not pin.omHooked then pin.omHooked = true hooksecurefunc(pin, "Hide", Zone.OMPinHidden) end
+        end
+        if math.abs(pin:GetAlpha() - share) > 0.001 then pin:SetAlpha(share) end
+        if share <= 0.02 then
+            if pin:IsShown() then
+                Zone.omHiding = true
+                pin:Hide()
+                Zone.omHiding = false
+                pin.omHidden = true
+            end
+        elseif pin.omHidden then
+            pin.omHidden = nil
+            pin:Show()
+        end
+    elseif Zone.omFaded[pin] then
+        Zone.omFaded[pin] = nil
+        pin:SetAlpha(1)
+        if pin.omHidden then pin.omHidden = nil pin:Show() end
+    end
+end
+
+-- OpenMap's lines (Questie's paths as OpenMap draws them, flight routes, drawings): the game doesn't cut a line
+-- with the zone's border as it does a picture, so each piece is judged by its middle, as the icons are by their
+-- spot: outside, at the rest of the map's visibility (unseen at 0%). Its middle is known from where OpenMap drew
+-- it (S.AddLine, S.AddPath: in its world). A piece that crosses the border shows or goes whole; a path is
+-- many short pieces.
+Zone.omLines = setmetatable({}, { __mode = "k" })  -- [line] = true: every line OpenMap drew since the hook
+Zone.omLinesFaded = setmetatable({}, { __mode = "k" })
+function Zone.OMLineLook(line, share)
+    local out = false
+    if share < 1 and line.omMidU then
+        if line.omZone == Zone.zoneNow and line.omGen == Zone.omGen and line.omMidKey == line.omMidU + line.omMidV then
+            out = line.omOut
+        else
+            out = Zone.WorldOutside(line.omMidU, line.omMidV) and true or false
+            line.omZone, line.omGen, line.omMidKey, line.omOut = Zone.zoneNow, Zone.omGen, line.omMidU + line.omMidV, out
+        end
+    end
+    if out then
+        Zone.omLinesFaded[line] = true
+        if math.abs(line:GetAlpha() - share) > 0.001 then line:SetAlpha(share) end
+    elseif Zone.omLinesFaded[line] then
+        Zone.omLinesFaded[line] = nil
+        line:SetAlpha(1)
+    end
+end
+function Zone.OMLineDrawn(line, u1, v1, u2, v2)
+    if not (line and type(u1) == "number" and type(v1) == "number" and type(u2) == "number" and type(v2) == "number") then return end
+    Zone.omLines[line] = true
+    line.omMidU, line.omMidV = (u1 + u2) / 2, (v1 + v2) / 2
+    -- (a line OpenMap takes back from its pool keeps the alpha it was given here: judged again at once)
+    if compact or Zone.omLinesFaded[line] then Zone.OMLineLook(line, compact and Zone.OutsideShare() or 1) end
+end
+
+-- Every icon again (the zone, the visibility or the icons changed); share 1: all back as they were
+function Zone.OMPinsApply(share)
+    if share < 1 or next(Zone.omLinesFaded) then
+        for line in pairs(Zone.omLines) do Zone.OMLineLook(line, share) end
+    end
+    if share >= 1 and not next(Zone.omFaded) then return end
+    for pin in pairs(Zone.omPins) do
+        if Zone.omFaded[pin] or (share < 1 and pin:IsShown()) then Zone.OMPinLook(pin, share) end
+    end
+end
+
+-- Hooked once: each icon OpenMap adds or moves is judged right away (a reused one too: one faded here and
+-- given back to OpenMap's pool comes back faded otherwise). The ones made before: found once on its layer.
+function Zone.HookOMPins()
+    if Zone.omHooked then return end
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    if not (S and type(S.AddPin) == "function" and type(S.MovePin) == "function") then return end
+    Zone.omHooked = true
+    local function judge(pin)
+        if not pin then return end
+        Zone.omPins[pin] = true
+        if compact and (Zone.omFaded[pin] or Zone.OutsideShare() < 1) then Zone.OMPinLook(pin, Zone.OutsideShare()) end
+    end
+    hooksecurefunc(S, "AddPin", function(set) if type(set) == "table" and set.pins then judge(set.pins[#set.pins]) end end)
+    hooksecurefunc(S, "MovePin", function(_, pin) judge(pin) end)
+    if type(S.AddLine) == "function" then
+        hooksecurefunc(S, "AddLine", function(set, u1, v1, u2, v2)
+            if type(set) == "table" and set.lines then Zone.OMLineDrawn(set.lines[#set.lines], u1, v1, u2, v2) end
+        end)
+    end
+    if type(S.AddPath) == "function" then
+        -- (one piece between each two points, the last ones added)
+        hooksecurefunc(S, "AddPath", function(set, pts)
+            if type(set) ~= "table" or not set.lines or type(pts) ~= "table" then return end
+            local n = math.floor(#pts / 2) - 1
+            local first = #set.lines - n
+            for k = 1, n do
+                local i = 2 * k - 1
+                Zone.OMLineDrawn(set.lines[first + k], pts[i], pts[i + 1], pts[i + 2], pts[i + 3])
+            end
+        end)
+    end
+    -- (the paths drawn before the hook: OpenMap asked to draw them again, now through it)
+    local mod = Zone.OpenMapModule()
+    if mod and type(mod.DrawQuestiePaths) == "function" then pcall(mod.DrawQuestiePaths) end
+    Zone.OMWalkLayers()
+end
+
+-- One of OpenMap's icons (a button at a world spot), not one of its other frames
+function Zone.IsOMPin(f)
+    return type(f.u) == "number" and type(f.v) == "number" and f.look ~= nil
+end
+
+-- The icons already on an icon layer, found once per layer (one that turns up after the hook too: OpenMap's
+-- icon layer can be found a moment after the map opens, its icons placed before)
+Zone.omLayers = setmetatable({}, { __mode = "k" })
+function Zone.OMWalkLayers()
+    if not Zone.omHooked then return end
+    local function walk(f, depth)
+        for _, child in ipairs({ f:GetChildren() }) do
+            if Zone.IsOMPin(child) then
+                Zone.omPins[child] = true
+            elseif depth > 0 then
+                walk(child, depth - 1)
+            end
+        end
+    end
+    for f in pairs(iconLayers) do
+        if not Zone.omLayers[f] then Zone.omLayers[f] = true walk(f, 3) end
+    end
 end
 
 function Zone.Reset(keepLoaded)
@@ -1881,6 +2222,18 @@ local maskedTex = {                                      -- kind -> picture -> t
     zone = setmetatable({}, { __mode = "k" }),
 }
 
+-- A marker leaving the map for Overlay Map's layers takes its pictures' zone cut with it (laid while it was
+-- still on the map, as the map opened): taken off, so a marker near the border isn't cut there
+function Zone.Unzone(f, depth)
+    for _, r in ipairs({ f:GetRegions() }) do
+        local m = maskedTex.zone[r]
+        if m and not Zone.IsPath(f) then pcall(r.RemoveMaskTexture, r, m) maskedTex.zone[r] = nil end
+    end
+    if depth > 0 then
+        for _, child in ipairs({ f:GetChildren() }) do Zone.Unzone(child, depth - 1) end
+    end
+end
+
 local function MaskFor(frame, kind)
     local m = masks[kind][frame]
     if not m then
@@ -1998,7 +2351,12 @@ end
 local function MaskRegions(frame, kind, m)
     local on = maskedTex[kind]
     for _, r in ipairs({ frame:GetRegions() }) do
-        if r:GetObjectType() == "Texture" then
+        -- (pictures only: the game doesn't cut lines with a mask, OpenMap's are faded instead, Zone.OMLineLook.
+        -- On the markers' layer, the zone's border only cuts Questie's path pictures: Zone.pathsOnly)
+        if Zone.pathsOnly and not Zone.IsPath(frame) then
+            -- (a marker's picture with a zone cut from its time on the map: off, Zone.Unzone)
+            if on[r] then pcall(r.RemoveMaskTexture, r, on[r]) on[r] = nil end
+        elseif r:GetObjectType() == "Texture" then
             local old = on[r]
             if old ~= m then
                 if old then pcall(r.RemoveMaskTexture, r, old) end
@@ -2044,6 +2402,18 @@ Zone.ForgetWalked = function() wipe(Zone.kids) end -- (now and then, for childre
 
 local function MaskTree(frame, depth, kind)
     if depth > 5 or frame:IsForbidden() then return end
+    -- (OpenMap's icons aren't cut by the zone's border either, as the markers: whole inside it, and outside
+    -- it at the rest of the map's visibility, Zone.OMPinLook. Its paths, on the same layer, are still cut)
+    if kind == "zone" and Zone.IsOMPin(frame) then
+        if Zone.walked.zone[frame] ~= -1 then
+            Zone.walked.zone[frame] = -1
+            for _, r in ipairs({ frame:GetRegions() }) do
+                local m = maskedTex.zone[r]
+                if m then pcall(r.RemoveMaskTexture, r, m) maskedTex.zone[r] = nil end
+            end
+        end
+        return
+    end
     Zone.Breathe()
     local count = frame:GetNumRegions()
     if count > 0 then
@@ -2188,7 +2558,16 @@ function Zone.ApplyEdgesNow(keepZone)
                     MaskRegions(cv, kind, m)
                 end
             end
-            if layer and layer:IsShown() then MaskTree(layer, 0, kind) end
+            -- (markers: not cut by the zone's border, a marker near it was cut in half; each is shown whole, on
+            -- the markers' layer inside the zone, or on the outside layer: Zone.PinLayer. The soft edges still fade them)
+            if layer and layer:IsShown() and kind ~= "zone" then MaskTree(layer, 0, kind) end
+            -- (but Questie's paths among them are cut by it: a path crosses the border, it has no one spot)
+            if layer and layer:IsShown() and kind == "zone" then
+                Zone.pathsOnly = true
+                MaskTree(layer, 0, kind)
+                Zone.pathsOnly = false
+            end
+            if kind == "shape" and Zone.outLayer and Zone.outLayer:IsShown() then MaskTree(Zone.outLayer, 0, kind) end
             if viewLayer and viewLayer:IsShown() then MaskTree(viewLayer, 0, kind) end
             -- (Torn Parchment's burnt rim: faded outside your zone like the rest of the map)
             if kind == "zone" and rim and rim:IsShown() then MaskTree(rim, 0, kind) end
@@ -2209,6 +2588,31 @@ Zone.Redraw = function() ApplyEdges(true) end
 -- every EDGE_GAP seconds: the map moving (Follow Me, dragging, zooming) asks for it every frame.
 local edgesPending, edgesLast = false, 0
 local EDGE_GAP = 0.25
+-- A while after the map opens, once OpenMap has placed its icons and paths: which side of the zone's border
+-- each marker and icon is on, worked out again from scratch, and OpenMap's layer gone through again for the
+-- border's cut. Done earlier, some were judged or cut before they were in place, and stayed so until the
+-- zone changed (showing outside the border, or its paths uncut, until you looked at another zone and back).
+function Zone.FreshLook()
+    if not compact or not (db.zoneBorder and Zone.zoneNow) then return end
+    wipe(Zone.pinWhere)
+    Zone.omGen = (Zone.omGen or 0) + 1
+    Zone.omKey = nil
+    Keep.pinsDirty = true
+    if viewLayer then
+        local function forget(f, depth)
+            Zone.walked.zone[f], Zone.walked.shape[f] = nil, nil
+            if depth >= 5 then return end
+            for _, child in ipairs({ f:GetChildren() }) do forget(child, depth + 1) end
+        end
+        forget(viewLayer, 0)
+        if layer then forget(layer, 0) end
+        wipe(Zone.kids)
+    end
+    Zone.OMWalkLayers()
+    ApplyOpacity()
+    ApplyEdges(true)
+end
+
 local function QueueEdges()
     if edgesPending or not compact or (not WantShapeMask() and not db.zoneBorder) then return end
     edgesPending = true
@@ -2274,6 +2678,81 @@ end
 
 -- now: as the map opens, at once and even with the mouse over the map, so it opens where Follow Me
 -- keeps it (it used to open where OpenMap reopens, and jump to Follow Me's view once the mouse left)
+-- Fade while moving (db.moveFade): the map fades while you move, smoothly, and comes back as you stop,
+-- like OpenMap's own "Fade while moving", with or without OpenMap. Held solid with the mouse over the map
+-- (not while steering with it: the cursor's hidden then), in full-screen overlay only over a marker or with
+-- Shift held. OpenMap's own fade is held off while Overlay Map shows the map (Keep.HoldOMFade): both setting
+-- the map's opacity, OpenMap's won and Overlay Map's opacity did nothing.
+Keep.MOVE_FADE_RATE = 6 -- the fade's approach, per second (as OpenMap's)
+Keep.moveFader = CreateFrame("Frame")
+Keep.moveFader:Hide()
+Keep.moveFader:SetScript("OnUpdate", function(self, elapsed)
+    if not compact then
+        Keep.moveFaded = 1
+        self:Hide()
+        return
+    end
+    local moving = false
+    if GetUnitSpeed then moving = (GetUnitSpeed("player") or 0) > 0 end
+    if not moving and IsPlayerMoving then moving = IsPlayerMoving() and true or false end
+    local hold = false
+    if not db.moveFadeHover then
+        hold = false -- (the mouse over the map doesn't stop the fade: "Solid under the mouse" off)
+    elseif db.overlay then
+        hold = IsShiftKeyDown() or OverMarker()
+    else
+        hold = Canvas():IsMouseOver() and not (IsMouselooking and IsMouselooking())
+    end
+    local want = (moving and not hold) and 1 - (db.moveFade or 0) or 1
+    local now = Keep.moveFaded or 1
+    if math.abs(now - want) < 0.005 then
+        now = want
+    else
+        now = now + (want - now) * math.min(1, elapsed * Keep.MOVE_FADE_RATE)
+    end
+    if now ~= Keep.moveFaded then
+        Keep.moveFaded = now
+        ApplyOpacity()
+    end
+end)
+function Keep.MoveFade()
+    -- (the small panel's rows that only show with it on: shown or hidden as it goes on or off)
+    local fading = (db.moveFade or 0) > 0
+    if Keep.wasFading ~= nil and Keep.wasFading ~= fading and Keep.RefreshAll then Keep.RefreshAll() end
+    Keep.wasFading = fading
+    if compact and (db.moveFade or 0) > 0 then
+        Keep.moveFader:Show()
+    else
+        Keep.moveFader:Hide()
+        if Keep.moveFaded and Keep.moveFaded ~= 1 then
+            Keep.moveFaded = 1
+            if compact then ApplyOpacity() end
+        end
+    end
+end
+
+-- OpenMap's "Fade while moving" off while Overlay Map shows the map, and back as it closes (its setting
+-- kept in Overlay Map's saved settings meanwhile, so a crash or a reload with the map open doesn't lose it)
+function Keep.OMFadeDB()
+    local om = Zone.OpenMapModule()
+    return om and type(om.db) == "table" and om.db, om
+end
+function Keep.HoldOMFade()
+    local odb, om = Keep.OMFadeDB()
+    if not odb or (odb.moveFade or 0) <= 0 then return end
+    db.omMoveFade = odb.moveFade
+    odb.moveFade = 0
+    if om.RefreshExtras then pcall(om.RefreshExtras) end
+end
+function Keep.GiveOMFade()
+    if db.omMoveFade == nil then return end
+    local odb, om = Keep.OMFadeDB()
+    if not odb then return end
+    if (odb.moveFade or 0) == 0 then odb.moveFade = db.omMoveFade end -- (unless changed in OpenMap meanwhile)
+    db.omMoveFade = nil
+    if om.RefreshExtras then pcall(om.RefreshExtras) end
+end
+
 local function Follow(force, now)
     -- With the mouse over the map, it holds still so you can look at the markers (it catches up
     -- with you when the mouse leaves). In Overlay Mode the map fills the screen, so the mouse is
@@ -2906,9 +3385,10 @@ end
 
 -- force: as the map opens with Fit Zone on each opening, the cave fitted again over the zone
 function Zone.CheckPlaces(instant, force)
-    if not db.fitPlaces or UnitOnTaxi("player") then return end
+    if not (db.fitPlaces or db.fitTowns) or UnitOnTaxi("player") then return end
     local mine = not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KeepMyZoom()
     if Zone.InDungeon() then
+        if not db.fitPlaces then return end
         Zone.caveFor, Zone.beforeCave = nil, nil
         local id = C_Map.GetBestMapForUnit("player") or Map():GetMapID()
         if id and id ~= Zone.dungeonFor then
@@ -2919,7 +3399,8 @@ function Zone.CheckPlaces(instant, force)
     end
     Zone.dungeonFor = nil
     if not Zone.OpenMapStitched() then return end
-    local u0, v0, u1, v1 = Zone.CaveHere()
+    local u0, v0, u1, v1
+    if db.fitPlaces then u0, v0, u1, v1 = Zone.CaveHere() end
     if u0 then
         local key = string.format("%.5f %.5f", u0, v0)
         if key ~= Zone.caveFor or force then
@@ -2935,6 +3416,147 @@ function Zone.CheckPlaces(instant, force)
         -- (back out even after a zoom of your own inside, as going in)
         mine = false
         if not mine then Zone.LeaveCave(instant) end
+        Zone.townFor = nil -- (a town at the cave's mouth: zoomed in on again)
+        return
+    end
+    if not u0 then Zone.CheckTown(instant, force, mine) end
+end
+
+-- Towns (Auto-zoom towns): the game has no list of them, nor of their size. A town here: where an innkeeper
+-- (Questie's database of NPCs) or a flight master (OpenMap's flight network) is, not in a capital (which has
+-- its own map, fitted as a zone). Entering one (within TOWN_IN yards of one of them), the map zooms in on it,
+-- db.townSize yards across, centred on its innkeeper and flight master together; leaving it (past TOWN_OUT), back
+-- to your zone (Auto-zoom to zone) or the zoom you had. Not after a zoom of your own (Auto-zoom pause), and not
+-- on a flight: once you land.
+Zone.TOWN_IN, Zone.TOWN_OUT, Zone.TOWN_SAME = 130, 200, 250 -- yards (TOWN_SAME: one town's NPCs, apart)
+
+-- How much of OpenMap's world a yard is (from where it puts two points 500 yards apart)
+function Zone.WorldPerYard()
+    if Zone.perYard then return Zone.perYard end
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    local fl = _G.OpenMap and _G.OpenMap.MapFlights
+    if not (S and S.FromYards and fl and fl.nodes) then return end
+    for _, n in pairs(fl.nodes) do
+        local ok, u0, v0 = pcall(S.FromYards, n[2], n[3], n[4])
+        local ok2, u1, v1 = pcall(S.FromYards, n[2], n[3] + 500, n[4])
+        if ok and ok2 and u0 and u1 then
+            local d = math.sqrt((u1 - u0) ^ 2 + (v1 - v0) ^ 2) / 500
+            if d > 0 then Zone.perYard = d return d end
+        end
+    end
+end
+
+-- The towns' spots in OpenMap's world, gathered once (Questie's NPCs a few hundred a frame, so nothing stalls)
+function Zone.BuildTowns()
+    if Zone.towns or Zone.townsBuilding then return end
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    if not (S and S.Rect and S.FromYards) then return end
+    Zone.townsBuilding = true
+    local spots = {}
+    local function Add(u, v, what)
+        if not (u and v) then return end
+        -- (a capital's: left to Auto-zoom to zone)
+        local id = Zone.DeepestAt(u, v)
+        if id and (Zone.CITY_ZONE[id] or Zone.SAME_PLACE[id]) then return end
+        spots[#spots + 1] = { u, v, what }
+    end
+    local fl = _G.OpenMap.MapFlights
+    for _, n in pairs(fl and fl.nodes or {}) do
+        local ok, u, v = pcall(S.FromYards, n[2], n[3], n[4])
+        if ok then Add(u, v, "flight") end
+    end
+    local loader = _G.QuestieLoader
+    local okD, QDB = loader and pcall(loader.ImportModule, loader, "QuestieDB")
+    local okZ, ZoneDB = loader and pcall(loader.ImportModule, loader, "ZoneDB")
+    local flag = okD and type(QDB) == "table" and QDB.npcFlags and QDB.npcFlags.INNKEEPER
+    if not (flag and QDB.NPCPointers and QDB.QueryNPCSingle and okZ and type(ZoneDB) == "table" and ZoneDB.GetUiMapIdByAreaId) then
+        Zone.towns, Zone.townsBuilding = spots, false
+        return
+    end
+    local ids = {}
+    for id in pairs(QDB.NPCPointers) do ids[#ids + 1] = id end
+    local i = 0
+    local function Step()
+        local ok, err = pcall(function()
+            for _ = 1, 400 do
+                i = i + 1
+                local id = ids[i]
+                if not id then return end
+                local f = QDB.QueryNPCSingle(id, "npcFlags") or 0
+                if bit.band(f, flag) ~= 0 then
+                    for areaID, coords in pairs(QDB.QueryNPCSingle(id, "spawns") or {}) do
+                        local uiMapID = ZoneDB:GetUiMapIdByAreaId(areaID)
+                        local l, r, t, b
+                        if uiMapID then l, r, t, b = S.Rect(uiMapID) end
+                        if l then
+                            for _, c in ipairs(coords) do
+                                if c[1] and c[1] >= 0 then Add(l + c[1] / 100 * (r - l), t + c[2] / 100 * (b - t), "inn") end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        if not ok or i >= #ids then
+            Zone.towns, Zone.townsBuilding = spots, false
+            if not ok then Zone.townsError = tostring(err) end
+            return
+        end
+        C_Timer.After(0, Step)
+    end
+    Step()
+end
+
+-- The town you're in: its middle (its innkeeper and flight master together), or nil
+function Zone.TownHere(wasIn)
+    local towns, per = Zone.towns, Zone.WorldPerYard()
+    if not (towns and per) then return end
+    local u, v = Zone.PlayerWorld()
+    if not u then return end
+    local reach = (wasIn and Zone.TOWN_OUT or Zone.TOWN_IN) * per
+    local near, nearD
+    for _, t in ipairs(towns) do
+        local d = (t[1] - u) ^ 2 + (t[2] - v) ^ 2
+        if not nearD or d < nearD then near, nearD = t, d end
+    end
+    if not near or nearD > reach * reach then return end
+    local same, su, sv, n = Zone.TOWN_SAME * per, 0, 0, 0
+    for _, t in ipairs(towns) do
+        if (t[1] - near[1]) ^ 2 + (t[2] - near[2]) ^ 2 <= same * same then su, sv, n = su + t[1], sv + t[2], n + 1 end
+    end
+    return su / n, sv / n
+end
+
+function Zone.CheckTown(instant, force, mine)
+    if not db.fitTowns or not Zone.OpenMapStitched() then
+        Zone.townFor = nil
+        return
+    end
+    if not Zone.towns then Zone.BuildTowns() return end
+    local tu, tv = Zone.TownHere(Zone.townFor ~= nil)
+    if tu then
+        local key = string.format("%.4f %.4f", tu, tv)
+        if key == Zone.townFor and not force then return end
+        Zone.townFor = key
+        Zone.townNote = { at = GetTime(), mine = mine and true or false }
+        if mine then return end
+        local okV, _, _, z = pcall(_G.OpenMapAPI.GetView)
+        if not Zone.beforeTown and okV and type(z) == "number" then Zone.beforeTown = z end
+        local half = (db.townSize or 400) / 2 * Zone.WorldPerYard()
+        local fit = Zone.ZoomForBox(tu - half, tu + half, tv - half, tv + half)
+        if fit then Zone.ViewTo(tu, tv, fit, instant) end
+    elseif Zone.townFor then
+        Zone.townFor = nil
+        local before = Zone.beforeTown
+        Zone.beforeTown = nil
+        if mine then return end
+        local zone = Zone.PlayerZone()
+        if db.zoneBorder and db.zoneFitMode ~= "off" and zone and Zone.Available() then
+            Zone.Fit(zone, instant)
+            return
+        end
+        local u, v = Zone.PlayerWorld()
+        if before and u then Zone.ViewTo(u, v, before, instant) end
     end
 end
 
@@ -3266,13 +3888,65 @@ local function HideTownsfolkTwins()
     return true
 end
 
+-- The game's own quest markers (a quest ready to turn in, its objective) where Questie draws one of its own
+-- on the same spot: the game's hidden, Questie's kept. Exactly under Questie's, it didn't show, but with the
+-- markers see-through both did, one over the other.
+Keep.questTwin = setmetatable({}, { __mode = "k" })
+function Keep.HideQuestTwins()
+    local twins = setmetatable({}, { __mode = "k" })
+    Keep.questTwin = twins
+    local pools = Map().pinPools or {}
+    local quests = pools.QuestPinTemplate
+    if not (quests and quests.EnumerateActive) then return false end
+    local spots = {}
+    for template, pool in pairs(pools) do
+        if type(template) == "string" and template:find("HereBeDragons", 1, true) and pool.EnumerateActive then
+            for pin in pool:EnumerateActive() do
+                local icon = pin.icon
+                if icon and icon:IsShown() and not onlyHidden[icon] and not icon.isManualIcon then
+                    local x, y = icon:GetCenter()
+                    if x then
+                        local k = icon:GetEffectiveScale()
+                        spots[#spots + 1] = { x * k, y * k, icon:GetWidth() * k }
+                    end
+                end
+            end
+        end
+    end
+    if #spots == 0 then return false end
+    local any = false
+    for pin in quests:EnumerateActive() do
+        local x, y = pin:GetCenter()
+        if x then
+            local k = pin:GetEffectiveScale()
+            x, y = x * k, y * k
+            for _, sp in ipairs(spots) do
+                local reach = math.max(4, sp[3] * 0.5)
+                if math.abs(sp[1] - x) <= reach and math.abs(sp[2] - y) <= reach then
+                    twins[pin] = true
+                    HideMarker(pin)
+                    any = true
+                    break
+                end
+            end
+        end
+    end
+    return any
+end
+
 ApplyOnlyMe = function()
     if not compact then
         ShowMarkers()
         return
     end
     if not db.onlyMe then
-        if HideTownsfolkTwins() then ShowMarkers(IsTownsfolk) else ShowMarkers() end
+        local folk = HideTownsfolkTwins()
+        local quest = Keep.HideQuestTwins()
+        if folk or quest then
+            ShowMarkers(function(f) return (folk and IsTownsfolk(f)) or Keep.questTwin[f] end)
+        else
+            ShowMarkers()
+        end
         return
     end
     for template, pool in pairs(Map().pinPools or {}) do
@@ -3475,6 +4149,7 @@ ApplyLook = function()
     Outline.CheckDownload() -- (the same for the Outlines style)
     if not compact then return end
     local map = Map()
+    Keep.MoveFade()
     ApplyMarkerSize()
     ApplySize()
     Zone.LiveMinimap()
@@ -3570,6 +4245,9 @@ end
 
 local function Restore()
     if not compact then return end
+    Keep.GiveOMFade()
+    Keep.moveFader:Hide()
+    Keep.moveFaded = 1
     Zone.Unshelve(false)
     Zone.Reframe() -- (the dungeon map's frame, as it was)
     Zone.MinimapBack() -- (the minimap back in its corner, if it was lent to the map)
@@ -3617,6 +4295,7 @@ local function Open()
     local t0 = debugprofilestop()
     if map:IsShown() then return end -- already open the normal way: leave it alone
     if Blocked() then return end
+    Keep.HoldOMFade()
 
     -- Open it small and without the quest log. The game decides small or full screen from
     -- "miniWorldMap" as it opens, so that setting is set for this one opening and put back
@@ -3750,6 +4429,8 @@ local function Open()
         C_Timer.After(0.1, function()
             local tm3 = debugprofilestop()
             if compact then ApplyClickThrough(true) end
+            C_Timer.After(0.5, Zone.FreshLook)
+            C_Timer.After(2, Zone.FreshLook)
             -- (OpenMap's dungeon map, opened by now inside a dungeon: tidied and its markers off)
             Zone.holdFor = nil -- (its dungeon map tidied by now, if it's up: the map can fade in)
             if compact and Zone.DungeonViewShown() then
@@ -4050,10 +4731,10 @@ Zone.Reshape = ApplyShape
 -- that mode. The other mode's values wait in the saved settings (beforeOverlay: the normal map's,
 -- while Overlay Mode is on; overlaySet: Overlay Mode's, while it's off).
 local OVERLAY_KEYS = { "opacity", "pinOpacity", "markerSize", "arrowCustom", "arrowSize", "arrowOpacity", "style",
-    "edge", "shape", "zoneBorder", "zoneSoft", "zoneDim", "clickThrough", "noFade", "outlineLines", "outlineBack" }
+    "edge", "shape", "zoneBorder", "zoneSoft", "zoneDim", "clickThrough", "moveFade", "outlineLines", "outlineBack" }
 -- Overlay Mode the first time it's turned on: see-through, solid markers, large soft edges,
 -- click-through (the rest as the normal map has them)
-local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, noFade = true }
+local OVERLAY_START = { opacity = 0.3, pinOpacity = 1, edge = 3, clickThrough = true, moveFade = 0 }
 
 local RefreshPanel -- (further down)
 -- The small panel and the main options read the settings again (an option may grey out or show others)
@@ -4209,6 +4890,8 @@ Keep.TIPS = {
     clickThrough = "Clicks go through the map to the world. Hold Shift to drag and zoom the map.",
     follow = "Keeps the map centred on you as you move. It holds still while the mouse is over the map.",
     fitPlaces = "Entering a cave or mine, the map zooms in on it, and back out as you leave.",
+    fitTowns = "Entering a town (a place with an innkeeper or flight master), the map zooms in on it, and back out as you leave.",
+    townSize = "How much the map shows around a town it zooms in on, in yards across.",
     liveMinimap = "Inside dungeons, the game's own minimap (with your arrow) shown big in the map's place.",
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next hides it.",
 }
@@ -4242,17 +4925,19 @@ end
 -- A plain slider: label on the left, value on the right, the bar under them. reshape: Size and Width,
 -- laid out again once you let go (Keep.ShapeSoon)
 -- (fmt: how its value reads, a percentage if none; parent.enabledIf: greyed out while it says no)
+Keep.SLIDER_TOP = 6
 local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape, fmt)
     local function Show(fs, v) fs:SetText(fmt and fmt(v) or string.format("%d%%", v * 100 + 0.5)) end
+    -- (a little room above its name: apart from the option or line over it)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    text:SetPoint("TOPLEFT", 12, 0)
+    text:SetPoint("TOPLEFT", 12, -Keep.SLIDER_TOP)
     text:SetText(label)
     local value = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    value:SetPoint("TOPRIGHT", -12, 0)
+    value:SetPoint("TOPRIGHT", -12, -Keep.SLIDER_TOP)
     local s = CreateFrame("Slider", nil, parent)
     s:SetOrientation("HORIZONTAL")
-    s:SetPoint("TOPLEFT", 12, -19)
-    s:SetPoint("TOPRIGHT", -12, -19)
+    s:SetPoint("TOPLEFT", 12, -19 - Keep.SLIDER_TOP)
+    s:SetPoint("TOPRIGHT", -12, -19 - Keep.SLIDER_TOP)
     s:SetHeight(14)
     s:SetMinMaxValues(minValue, maxValue)
     s:SetValueStep(step)
@@ -4421,11 +5106,12 @@ local function PlacePanel()
     end
 end
 
-Keep.TABS = { "Map", "Look", "Zone", "Behavior" }
+Keep.TABS = { "Map", "Markers", "Look", "Zone", "Behavior" }
+Keep.PANEL_W = 300 -- (five tabs across)
 
 local function BuildPanel()
     panel = CreateFrame("Frame", "OverlayMapPanel", UIParent, "BackdropTemplate")
-    panel:SetWidth(280)
+    panel:SetWidth(Keep.PANEL_W)
     panel:SetFrameStrata("FULLSCREEN_DIALOG")
     panel:SetClampedToScreen(true)
     panel:EnableMouse(true)
@@ -4443,16 +5129,16 @@ local function BuildPanel()
 
     if not tContains(Keep.TABS, db.panelTab) then db.panelTab = "Map" end
     -- the tabs: a row of buttons under the title, the one shown in gold and underlined
+    -- (each as wide as its name plus the same room: the gaps between the names alike, not the buttons)
     local tabs = {}
-    local tabW = (280 - 20) / #Keep.TABS
+    local list = {}
     for i, name in ipairs(Keep.TABS) do
         local b = CreateFrame("Button", nil, panel)
-        b:SetSize(tabW, 22)
-        b:SetPoint("TOPLEFT", 10 + (i - 1) * tabW, -30)
         local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         t:SetPoint("CENTER")
         t:SetText(name)
         b.text = t
+        list[i] = b
         b.line = b:CreateTexture(nil, "ARTWORK")
         b.line:SetColorTexture(1, 0.82, 0, 0.9)
         b.line:SetHeight(2)
@@ -4465,6 +5151,16 @@ local function BuildPanel()
             RefreshPanel()
         end)
         tabs[name] = b
+    end
+    local names = 0
+    for _, b in ipairs(list) do names = names + b.text:GetStringWidth() end
+    local room = math.max(0, (Keep.PANEL_W - 20 - names) / #list)
+    local x = 10
+    for _, b in ipairs(list) do
+        local w = b.text:GetStringWidth() + room
+        b:SetSize(w, 22)
+        b:SetPoint("TOPLEFT", x, -30)
+        x = x + w
     end
     local base = panel:CreateTexture(nil, "ARTWORK")
     base:SetColorTexture(0.75, 0.55, 0.15, 0.4)
@@ -4483,28 +5179,51 @@ local function BuildPanel()
         return f
     end
     local function Gap(h) Row(h) end
+    -- a thin line between groups of rows (shown when `when` says so, as a row)
+    local function Line(when)
+        local f = Row(12, when)
+        local t = f:CreateTexture(nil, "ARTWORK")
+        t:SetColorTexture(0.75, 0.55, 0.15, 0.3)
+        t:SetHeight(1)
+        t:SetPoint("LEFT", 14, 0)
+        t:SetPoint("RIGHT", -14, 0)
+    end
 
+    local function Fading() return (db.moveFade or 0) > 0 end
     tab = "Map"
+    -- (its size, then how it fades)
     PanelCheck(Row(32), "overlay", "Full-screen overlay")
-    PanelSlider(Row(42, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
-    PanelSlider(Row(44, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
-    PanelSlider(Row(44), "opacity", "Map opacity", 0, 1, 0.05)
-    PanelSlider(Row(42), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
-    PanelSlider(Row(44), "markerSize", "Marker size", 0.5, 2.5, 0.05)
+    PanelSlider(Row(50, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
+    PanelSlider(Row(50, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
+    Line()
+    PanelSlider(Row(50), "opacity", "Map opacity", 0, 1, 0.05)
+    PanelSlider(Row(50), "moveFade", "Fade while moving", 0, 0.9, 0.05, nil,
+        function(v) return v < 0.025 and "Off" or string.format("%d%%", v * 100 + 0.5) end)
+    PanelCheck(Row(28, Fading), "moveFadeHover", "Solid under the mouse")
+    tab = "Markers"
+    -- (all the markers, then your arrow)
+    PanelSlider(Row(50), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
+    PanelSlider(Row(50), "markerSize", "Marker size", 0.5, 2.5, 0.05)
+    Line()
     PanelCheck(Row(28), "onlyMe", "Show only my arrow")
+    PanelCheck(Row(28), "arrowCustom", "Custom arrow size")
+    PanelSlider(Row(50, ArrowOwn), "arrowSize", "My arrow size", 0.5, 3, 0.05)
+    PanelSlider(Row(50, ArrowOwn), "arrowOpacity", "My arrow opacity", 0.1, 1, 0.05)
+    PanelCheck(Row(28, Fading), "moveFadeMarkers", "Fade markers too")
+    PanelCheck(Row(28, function() return Fading() and db.moveFadeMarkers end), "arrowNoFade", "My arrow doesn't fade")
     tab = "Look"
     PanelCycle(Row(30), "style", "Style", STYLE_CHOICES)
     PanelCycle(Row(30), "edge", "Fade at the edges", EDGE_CHOICES, StandardStyle)
     PanelCycle(Row(34), "shape", "Edge shape", SHAPE_CHOICES, StandardStyle)
-    PanelSlider(Row(44, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
-    PanelSlider(Row(44, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
+    PanelSlider(Row(50, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
+    PanelSlider(Row(50, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
     tab = "Zone"
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
     PanelCheck(Row(28), "zoneBorder", "Apply borders to zones", Zone.Installed, "Apply borders to zones (needs download)",
         "Zone borders need the Overlay Map: Zone Borders addon, a separate download (from where you got "
         .. "Overlay Map). Install it next to Overlay Map and restart the game.")
     PanelCheck(Row(30, ZoneOn), "zoneSoft", "Fade at the zone edges")
-    PanelSlider(Row(46, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
+    PanelSlider(Row(52, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
     PanelCycle(Row(30, ZoneOn), "zoneFitMode", "Auto-zoom to zone", Wizard.FIT_CHOICES)
     tab = "Behavior"
     PanelCycle(Row(32), "mode", "Key", Wizard.MODE_CHOICES)
@@ -4512,6 +5231,10 @@ local function BuildPanel()
     PanelCheck(Row(28), "follow", "Center on me")
     PanelCheck(Row(28), "fitPlaces", "Auto-zoom caves", OpenMapLoaded, "Auto-zoom caves (needs OpenMap)",
         "\"Auto-zoom caves\" needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
+    PanelCheck(Row(28), "fitTowns", "Auto-zoom towns", OpenMapLoaded, "Auto-zoom towns (needs OpenMap)",
+        "\"Auto-zoom towns\" needs OpenMap, whose map it zooms. Install OpenMap to use it.")
+    PanelSlider(Row(52, function() return OpenMapLoaded() and db.fitTowns end), "townSize", "Town zoom", 200, 1000, 50, nil,
+        function(v) return string.format("%d yd", v + 0.5) end)
     PanelCheck(Row(28), "liveMinimap", "Minimap as map in dungeons")
     panel.rows = rows
 
@@ -4528,7 +5251,7 @@ local function BuildPanel()
     all:SetText("All options")
     all:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("") end)
 
-    local TOP = 60
+    local TOP = 64 -- (the first row a little apart from the tabs' line)
     local function Layout()
         local tall = 0
         for _, name in ipairs(Keep.TABS) do
@@ -4995,31 +5718,31 @@ function Wizard.Build()
     PanelCheck(Wizard.Row(p, 28), "overlay", "Full-screen overlay")
     Wizard.Note(p, "The map fills the whole screen, see-through, with soft edges and click through. It "
         .. "keeps settings of its own.", 44)
-    PanelSlider(Wizard.Row(p, 42, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05)
-    PanelSlider(Wizard.Row(p, 42, NotOverlay), "width", "Width", 0.5, 1.5, 0.05)
+    PanelSlider(Wizard.Row(p, 48, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05)
+    PanelSlider(Wizard.Row(p, 48, NotOverlay), "width", "Width", 0.5, 1.5, 0.05)
     Wizard.Button(p, "Move the map", function() ShowMover() end, NotOverlay)
     Wizard.Note(p, "Drag the box, then right-click it when done.", 28, NotOverlay)
 
     p = Page("Map look")
-    PanelSlider(Wizard.Row(p, 44), "opacity", "Map opacity", 0, 1, 0.05)
+    PanelSlider(Wizard.Row(p, 50), "opacity", "Map opacity", 0, 1, 0.05)
     PanelCycle(Wizard.Row(p, 30), "style", "Style", STYLE_CHOICES)
     Wizard.Note(p, "Torn parchment: torn, burnt paper edges. Outlines (beta): only white lines for cliffs, "
         .. "water and roads (needs the Overlay Map: Outlines download).", 44)
     PanelCycle(Wizard.Row(p, 30, StandardStyle), "edge", "Fade at the edges", EDGE_CHOICES)
     PanelCycle(Wizard.Row(p, 34, StandardStyle), "shape", "Edge shape", SHAPE_CHOICES)
-    PanelSlider(Wizard.Row(p, 42, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
-    PanelSlider(Wizard.Row(p, 42, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
+    PanelSlider(Wizard.Row(p, 48, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
+    PanelSlider(Wizard.Row(p, 48, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
 
     p = Page("Markers")
     Wizard.Text(p, "Quests, vendors, flight points and other addons' icons on the map.", 30)
-    PanelSlider(Wizard.Row(p, 42), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
-    PanelSlider(Wizard.Row(p, 44), "markerSize", "Marker size", 0.5, 2.5, 0.05)
+    PanelSlider(Wizard.Row(p, 48), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
+    PanelSlider(Wizard.Row(p, 50), "markerSize", "Marker size", 0.5, 2.5, 0.05)
     PanelCheck(Wizard.Row(p, 28), "onlyMe", "Show only my arrow")
     Wizard.Note(p, "Hides every marker except your own arrow.", 24)
     PanelCheck(Wizard.Row(p, 28), "arrowCustom", "Custom arrow size")
     Wizard.Note(p, "Your arrow at a size and opacity of its own, apart from the other markers.", 30)
-    PanelSlider(Wizard.Row(p, 42, ArrowOwn), "arrowSize", "My arrow size", 0.5, 3, 0.05)
-    PanelSlider(Wizard.Row(p, 42, ArrowOwn), "arrowOpacity", "My arrow opacity", 0.1, 1, 0.05)
+    PanelSlider(Wizard.Row(p, 48, ArrowOwn), "arrowSize", "My arrow size", 0.5, 3, 0.05)
+    PanelSlider(Wizard.Row(p, 48, ArrowOwn), "arrowOpacity", "My arrow opacity", 0.1, 1, 0.05)
 
     p = Page("Zone borders")
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
@@ -5031,7 +5754,7 @@ function Wizard.Build()
         function() return not Zone.Installed() end)
     PanelCheck(Wizard.Row(p, 28, ZoneOn), "zoneSoft", "Fade at the zone edges")
     Wizard.Note(p, "The zone fades in from its edge, instead of a sharp cut.", 24, ZoneOn)
-    PanelSlider(Wizard.Row(p, 44, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
+    PanelSlider(Wizard.Row(p, 50, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
     PanelCycle(Wizard.Row(p, 30, ZoneOn), "zoneFitMode", "Auto-zoom to zone", Wizard.FIT_CHOICES)
     Wizard.Note(p, "Zooms the map so your whole zone fits, when you enter it (or also each time the "
         .. "map opens).", 30, ZoneOn)
@@ -5509,7 +6232,7 @@ function Keep.ListOptions()
     local overlayInit = Settings.CreateCheckbox(P.cat, Register("overlay", "Full-screen overlay"),
         "One switch for an overlay map: the map fills the whole screen, see-through and click-through, "
         .. "with solid markers and large soft edges. It keeps its own Map opacity, Marker opacity, Marker size, My Arrow, "
-        .. "Style, Fade at the edges, Shape, Click through the map and Don't fade while moving: what you change while it's "
+        .. "Style, Fade at the edges, Shape, Click through the map and Fade while moving: what you change while it's "
         .. "on stays with Full-screen overlay, and the normal map keeps its own. Size, width and position don't apply "
         .. "while it's on.")
 
@@ -5553,6 +6276,11 @@ function Keep.ListOptions()
         Under(arrowInit, init, ArrowOwn)
         if init and init.AddShownPredicate then init:AddShownPredicate(ArrowOwn) end
     end
+
+    Settings.CreateCheckbox(P.cat, Register("moveFadeMarkers", "Fade markers too"),
+        "With Fade while moving: the markers fade with the map as you move. Off: only the map fades, as with Map opacity.")
+    Settings.CreateCheckbox(P.cat, Register("arrowNoFade", "My arrow doesn't fade"),
+        "With Fade markers too: your arrow (and your party's) stays as it is while the map and the other markers fade as you move.")
 
     Button("", "Reset everything", function() StaticPopup_Show("OVERLAYMAP_RESET_ALL") end,
         "Puts every Overlay Map option, on every page, back to its default.")
@@ -5641,6 +6369,10 @@ function Keep.ListOptions()
         .. "the cave fills it, and back out when you leave (to your zone with \"Auto-zoom to zone\" and zone borders, else to the "
         .. "zoom you had). Works with zone borders or without it.")
     if fitInit and fitInit.AddModifyPredicate then fitInit:AddModifyPredicate(OpenMapLoaded) end
+    local townInit = Settings.CreateCheckbox(P.cat, Register("fitTowns", NeedsOM("Auto-zoom towns")),
+        "Needs OpenMap. Entering a town (a place with an innkeeper or flight master, not a capital), the map "
+        .. "zooms in on it, and back out when you leave.")
+    if townInit and townInit.AddModifyPredicate then townInit:AddModifyPredicate(OpenMapLoaded) end
     Settings.CreateCheckbox(P.cat, Register("liveMinimap", "Minimap as map in dungeons"),
         "Inside dungeons and raids the game doesn't let addons know where you are, so no map can show your "
         .. "arrow there. With this on, the game's own minimap (which can) is shown big in the map's place, "
@@ -5649,8 +6381,10 @@ function Keep.ListOptions()
     Settings.CreateCheckbox(P.cat, Register("rememberZoom", "Open at last zoom"),
         "Opens at the zoom the map had when you last closed it, apart from the normal map's. With OpenMap, "
         .. "OpenMap's own reopen option still decides where it's centred.")
-    Settings.CreateCheckbox(P.cat, Register("noFade", "Don't fade while moving"),
-        "With this off, the map fades to half while you move, like the game's own map.")
+    Slider("moveFade", "Fade while moving", "How much the map fades while you move. It comes back as you stop, "
+        .. "or with the mouse over the map. 0%: it doesn't fade.", 0, 0.9, 0.05)
+    Settings.CreateCheckbox(P.cat, Register("moveFadeHover", "Solid under the mouse"),
+        "With Fade while moving: the map comes back while the mouse is over it. Off: it stays faded while you move.")
     Settings.CreateCheckbox(P.cat, Register("hideMinimap", "Hide minimap"),
         "Hides the minimap while the map is open.")
 
@@ -5713,11 +6447,14 @@ Keep.DESC = {
     width = "Width of the map compared to its usual shape. Lower makes it more square.",
     opacity = "How see-through the map itself is. At 0%, only the markers show, floating over the world.",
     rememberZoom = "Opens at the zoom the map had when you last closed it, apart from the normal map's.",
-    noFade = "With this off, the map fades to half while you move, like the game's own map.",
+    moveFade = "How much the map fades while you move. It comes back as you stop (or with the mouse over the map: Solid under the mouse). Off: it doesn't fade. While Overlay Map shows the map, OpenMap's own Fade while moving waits.",
+    moveFadeHover = "With Fade while moving: the map comes back while the mouse is over it (in full-screen overlay: over a marker, or with Shift held). Off: it stays faded while you move, wherever the mouse is.",
     pinOpacity = "How see-through the markers are: quests, vendors, flight points, your arrow and other addons' markers.",
     markerSize = "Size of the markers, Questie's and OpenMap's icons too (on top of OpenMap's own Icon size).",
     onlyMe = "Hides every marker on the map except your own arrow. The map's picture stays.",
     arrowCustom = "Your arrow at a size and opacity of its own, apart from the other markers.",
+    arrowNoFade = "With Fade markers too: your arrow (and your party's) stays as it is while the map and the other markers fade as you move.",
+    moveFadeMarkers = "With Fade while moving: the markers fade with the map as you move. Off: only the map fades, as with Map opacity.",
     arrowSize = "Size of your arrow on the map.",
     arrowOpacity = "How see-through your arrow on the map is.",
     style = "Standard: the map as it is. Torn parchment: torn, burnt paper edges. Outlines (beta): only white lines for cliffs, water and roads over a dark background (needs the Overlay Map: Outlines download).",
@@ -5954,7 +6691,9 @@ function Keep.BuildTabs(canvas, O)
         { "Reset position", function() db.x, db.y = 0, 0 if mover and mover:IsShown() then ShowMover() end ApplyLook() end,
             "Puts the map back in the middle of the screen." } }, NotOverlay, "Move Reset position")
     Check("rememberZoom", "Open at last zoom")
-    Check("noFade", "Don't fade while moving")
+    Slider("moveFade", "Fade while moving", 0, 0.9, 0.05, nil, nil,
+        function(v) return v < 0.025 and "Off" or string.format("%d%%", v * 100 + 0.5) end)
+    Check("moveFadeHover", "Solid under the mouse", function() return (db.moveFade or 0) > 0 end)
     TabReset()
 
     tab = "Markers"
@@ -5964,6 +6703,8 @@ function Keep.BuildTabs(canvas, O)
     Check("arrowCustom", "Custom arrow size")
     Slider("arrowSize", "My arrow size", 0.5, 3, 0.05, ArrowOwn)
     Slider("arrowOpacity", "My arrow opacity", 0.1, 1, 0.05, ArrowOwn)
+    Check("moveFadeMarkers", "Fade markers too", function() return (db.moveFade or 0) > 0 end)
+    Check("arrowNoFade", "My arrow doesn't fade", function() return (db.moveFade or 0) > 0 and db.moveFadeMarkers end)
     TabReset()
 
     tab = "Style"
@@ -5993,6 +6734,10 @@ function Keep.BuildTabs(canvas, O)
     Check("follow", "Center on me")
     Check("fitPlaces", "Auto-zoom caves", OpenMapLoaded, "Auto-zoom caves (needs OpenMap)",
         "\"Auto-zoom caves\" needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
+    Check("fitTowns", "Auto-zoom towns", OpenMapLoaded, "Auto-zoom towns (needs OpenMap)",
+        "\"Auto-zoom towns\" needs OpenMap, whose map it zooms. Install OpenMap to use it.")
+    Slider("townSize", "Town zoom", 200, 1000, 50, function() return OpenMapLoaded() and db.fitTowns end, nil,
+        function(v) return string.format("%d yd", v + 0.5) end)
     Check("liveMinimap", "Minimap as map in dungeons")
     TabReset()
 
@@ -6254,6 +6999,23 @@ function OverlayMap_Debug()
     end
     do
         local u0 = Zone.CaveHere()
+        do
+            local tu, tv = Zone.TownHere(Zone.townFor ~= nil)
+            local per = Zone.WorldPerYard()
+            local near
+            local pu, pv = Zone.PlayerWorld()
+            if Zone.towns and per and pu then
+                for _, t in ipairs(Zone.towns) do
+                    local d = math.sqrt((t[1] - pu) ^ 2 + (t[2] - pv) ^ 2) / per
+                    if not near or d < near then near = d end
+                end
+            end
+            Say(string.format("Towns: %s; %s spots known%s; nearest %s yd; %s%s", db.fitTowns and "on" or "off",
+                Zone.towns and tostring(#Zone.towns) or (Zone.townsBuilding and "still gathering" or "none"),
+                Zone.townsError and (" (error: " .. Zone.townsError .. ")") or "",
+                near and string.format("%d", near) or "?", tu and "in a town" or "not in a town",
+                Zone.townNote and (Zone.townNote.mine and ", kept your zoom" or "") or ""))
+        end
         Say("Caves and dungeons: " .. (db.fitPlaces and "on" or "off") .. "; "
             .. (Zone.InDungeon() and ("in a dungeon, map " .. tostring(C_Map.GetBestMapForUnit("player")))
                 or u0 and "in a cave" or ("not in a cave" .. ((IsIndoors and IsIndoors()) and " (indoors)" or "")))
@@ -6334,6 +7096,49 @@ function OverlayMap_Debug()
             .. (Zone.zoneAnchor and string.format(", placed at %.0f, %.0f, %.0f x %.0f", Zone.zoneAnchor:GetLeft() or 0,
                 Zone.zoneAnchor:GetTop() or 0, Zone.zoneAnchor:GetWidth(), Zone.zoneAnchor:GetHeight()) or ""))
             or ("none, " .. tostring(Zone.why or "?"))))
+        -- (the markers sorted by the border: on the markers' layer inside it, on the outside layer outside)
+        local inside, outside = 0, 0
+        for pin in pairs(moved) do
+            if pin:GetParent() == Zone.outLayer then outside = outside + 1 elseif pin:GetParent() == layer then inside = inside + 1 end
+        end
+        Say(string.format("  markers: %d inside the border, %d outside (outside layer %s, alpha %.2f)", inside, outside,
+            Zone.outLayer and (Zone.outLayer:IsShown() and "shown" or "hidden") or "not made", Zone.outLayer and Zone.outLayer:GetAlpha() or 0))
+        local omAll, omOut, omHid = 0, 0, 0
+        for pin in pairs(Zone.omPins) do
+            omAll = omAll + 1
+            if Zone.omFaded[pin] then omOut = omOut + 1 if pin.omHidden then omHid = omHid + 1 end end
+        end
+        Say(string.format("  OpenMap icons: %d known, %d outside the border (%d hidden)%s", omAll, omOut, omHid,
+            Zone.omHooked and "" or ", not hooked"))
+        local lines, cut, shownLines = 0, 0, 0
+        local function count(f, depth)
+            for _, r in ipairs({ f:GetRegions() }) do
+                if r:GetObjectType() == "Line" then
+                    lines = lines + 1
+                    if r:IsVisible() then shownLines = shownLines + 1 end
+                    if maskedTex.zone[r] then cut = cut + 1 end
+                end
+            end
+            if depth < 3 then for _, child in ipairs({ f:GetChildren() }) do count(child, depth + 1) end end
+        end
+        if viewLayer then count(viewLayer, 0) end
+        if layer then count(layer, 0) end
+        local stretches, stretchesCut = 0, 0
+        if layer then
+            for _, pin in ipairs({ layer:GetChildren() }) do
+                local icon = pin.icon
+                if icon and icon.type == "line" then
+                    stretches = stretches + 1
+                    for _, r in ipairs({ icon:GetRegions() }) do if maskedTex.zone[r] then stretchesCut = stretchesCut + 1 break end end
+                end
+            end
+        end
+        local omLines, omLinesOut = 0, 0
+        for line in pairs(Zone.omLines) do
+            if line:IsShown() then omLines = omLines + 1 if Zone.omLinesFaded[line] then omLinesOut = omLinesOut + 1 end end
+        end
+        Say(string.format("  paths: %d lines (%d showing), %d cut by the border; Questie path stretches %d, %d cut; OpenMap's lines %d, %d outside the border",
+            lines, shownLines, cut, stretches, stretchesCut, omLines, omLinesOut))
         local okV, _, _, z = pcall(function() return _G.OpenMapAPI.GetView() end)
         if Zone.zoneNow and okV and type(z) == "number" then
             Say(string.format("  fills %d%% of the view; rest of the map at %s%%%s", Zone.Fill(Zone.zoneNow, z) * 100 + 0.5,
@@ -6517,6 +7322,14 @@ events:SetScript("OnEvent", function(self, event, name)
         db.zoneFit, db.zoneFitOpen = nil, nil
         if db.zoneViewOff == nil then db.zoneView, db.zoneViewOff = false, true end -- (a test version had it on)
         if not SHAPE_FILES[db.shape] then db.shape = DEFAULTS.shape end
+        -- ("Don't fade while moving" is now "Fade while moving", by how much: off was half)
+        for _, t in ipairs({ db, db.beforeOverlay or false, db.overlaySet or false }) do
+            if t and t.noFade ~= nil then
+                if t.moveFade == nil or t == db then t.moveFade = t.noFade == false and 0.5 or 0 end
+                t.noFade = nil
+            end
+        end
+        if type(db.moveFade) ~= "number" then db.moveFade = 0 end
         if db.zoneOutside == "hide" then db.zoneDim = 0 end -- (an earlier test's setting)
         db.zoneOutside = nil
         if type(db.zoneDim) ~= "number" then db.zoneDim = DEFAULTS.zoneDim end
@@ -6528,6 +7341,7 @@ events:SetScript("OnEvent", function(self, event, name)
         end
         BuildOptions()
     elseif event == "PLAYER_LOGOUT" then
+        Keep.GiveOMFade() -- (OpenMap's fade back before it saves)
         -- (logging out or quitting with the map open: names back before the game saves its options)
         if db and db.namesSaved then
             for n, v in pairs(db.namesSaved) do pcall(SetCVar, n, v) end
@@ -6537,6 +7351,7 @@ events:SetScript("OnEvent", function(self, event, name)
         HookMap()
         ShowNames() -- (names left hidden if the game closed with the map open)
         Keep.NamesAfterCrash()
+        Keep.GiveOMFade() -- (OpenMap's fade, if the game closed with the map open)
         -- OpenMap's view moved: the zone border follows at once (not only once a second)
         local api = _G.OpenMapAPI
         if api and api.RegisterCallback then
