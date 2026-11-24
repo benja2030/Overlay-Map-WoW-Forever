@@ -3,7 +3,7 @@
 ## Notes: An overlay map for WoW: Forever: the map of your zone over the world with a key, see-through, with soft or torn parchment edges, following you.
 ## IconTexture: Interface\AddOns\OverlayMap\Media\Logo
 ## Author: benja2030
-## Version: 1.2.6
+## Version: 1.2.7
 ## OptionalDeps: OverlayMap_ZoneBorders
 ## SavedVariables: OverlayMapDB, QuickMapDB
 

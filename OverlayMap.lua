@@ -23,7 +23,7 @@ local DEFAULTS = {
     moveFadeHover = true, -- Fade while moving: the map solid again with the mouse over it
     moveFadeCombat = false, -- Fade while moving: the same fade all through combat, moving or not
     moveFadeFlight = false, -- Fade while moving: not on a flight (the map solid while you fly)
-    combatReady = false, -- in a group: the map opened unseen as combat starts, so the key works in the fight
+    combatReady = false, -- the map opened unseen as combat starts (in a group, or with OpenMap), so it opens right in the fight
     moveFadeMarkers = false, -- Fade while moving: the markers fade with the map (off: only the map, as Map opacity)
     hideMinimap = true, -- hide the minimap while the map is open
     follow = false,  -- keep the map centred on you while it's open, like the minimap
@@ -220,10 +220,21 @@ local function WantWidth() local _, w = FullScreen() return w or db.width end
 local function AnchorCanvas()
     local c = Canvas()
     CoverScreen()
-    c:ClearAllPoints()
     local ue, ce = UIParent:GetEffectiveScale(), c:GetEffectiveScale()
     local x, y = db.x, db.y
     if db.overlay then x, y = 0, 0 end
+    -- (already where it belongs, on its one point: left alone. In a fight the game may refuse the new point after
+    -- the old ones were cleared, and the map area fell back on the game's own place for it, lower and to the left)
+    local cx, cy = c:GetCenter()
+    local ux, uy = UIParent:GetCenter()
+    if cx and ux and c:GetNumPoints() == 1 and math.abs(cx * ce - (ux + x) * ue) < 1 and math.abs(cy * ce - (uy + y) * ue) < 1 then
+        return
+    end
+    -- (in a fight, on its one point already: moved by that point, without clearing it first)
+    if InCombatLockdown() and c:GetNumPoints() == 1 and c:GetPoint(1) == "CENTER" then
+        if pcall(c.SetPoint, c, "CENTER", UIParent, "CENTER", x * ue / ce, y * ue / ce) then return end
+    end
+    c:ClearAllPoints()
     if pcall(c.SetPoint, c, "CENTER", UIParent, "CENTER", x * ue / ce, y * ue / ce) then return end
     -- The game can refuse anchoring the map area to the screen ("anchor family connection": with some markers
     -- or another addon's frames on the map, it counts as part of the map window's family): then to the map
@@ -243,6 +254,7 @@ end
 local function Place()
     AnchorCanvas()
 end
+
 
 -- Other parts of the interface hidden while the map is open, each group with its own option.
 -- Frames that don't exist (another client, an addon not installed) are skipped.
@@ -303,6 +315,24 @@ local function Unhide(f)
 end
 
 local Keep = {}
+
+-- The map area where it belongs on screen? Anchored to the map window (when the game refused the screen, as it
+-- can in a fight), it went along when the game moved that window (opening the map as a fight starts, Ready in
+-- combat): checked once a second, and placed again when it's off
+function Keep.CheckPlace()
+    local c = Canvas()
+    if not c then return end
+    local cx, cy = c:GetCenter()
+    local ux, uy = UIParent:GetCenter()
+    if not (cx and ux) then return end
+    local ce, ue = c:GetEffectiveScale(), UIParent:GetEffectiveScale()
+    local x, y = db.x or 0, db.y or 0
+    if db.overlay then x, y = 0, 0 end
+    if math.abs(cx * ce - (ux + x) * ue) > 2 or math.abs(cy * ce - (uy + y) * ue) > 2 then
+        pcall(Place)
+        if Keep.AfterPlace then Keep.AfterPlace() end
+    end
+end
 -- Other addons' frames: an addon may hide its own frames, even protected ones, out of combat (the
 -- game's own protected frames are left alone: hiding them from an addon caused trouble). Kept
 -- hidden while the map is open: if the addon shows one again, it's hidden again at once.
@@ -843,6 +873,7 @@ SyncLayer = function()
     if Zone.arrowLayer then Sync(Zone.arrowLayer, Canvas():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3) end
     if Zone.arrowPinLayer then Sync(Zone.arrowPinLayer, Content():GetEffectiveScale() / UIParent:GetEffectiveScale(), 3) end
 end
+Keep.AfterPlace = function() SyncLayer() end -- (Keep.CheckPlace, further up)
 
 -- OpenMap draws your arrow on its icon layer, which goes under the markers' layer (Questie's icons
 -- over OpenMap's, as on OpenMap's own map): with the markers on their own layer, quest icons
@@ -1087,8 +1118,8 @@ local function ApplyOpacity()
     -- (the same opacity: the markers stay on the map. Not with an addon's icon layer, like OpenMap's:
     -- on the map it's over the markers, so its icons covered your arrow, which is the game's marker
     -- when OpenMap doesn't draw its own; on Overlay Map's layers your arrow goes over them)
-    if math.abs(db.pinOpacity - db.opacity) < 0.001 and db.style ~= "outlines" and not next(iconLayers)
-        and not (db.zoneBorder and Zone.zoneNow) and not ((db.moveFade or 0) > 0 and not db.moveFadeMarkers) then
+    if math.abs(db.pinOpacity - db.opacity) < 0.001 and db.style ~= "outlines" and not next(iconLayers) and not Keep.combatMismatch
+        and not (db.zoneBorder and Zone.MarkZone()) and not ((db.moveFade or 0) > 0 and not db.moveFadeMarkers) then
         if next(moved) then ReturnPins() end
         if next(Zone.omFaded) or next(Zone.omLinesFaded) then Zone.OMPinsApply(1) Zone.omKey = nil end
         return
@@ -1105,6 +1136,10 @@ local function ApplyOpacity()
     -- (over OpenMap's dungeon map: the world's markers underneath kept off it)
     -- (also while inside a dungeon its map is only away in the journal's window for a moment)
     local pinFade = (Zone.live or Zone.DungeonViewShown() or (Zone.underAlpha ~= nil and Zone.InDungeon())) and 0 or 1
+    -- (opened in a fight with OpenMap: the game's own markers out of place till it ends, Keep.combatMismatch.
+    -- Those hidden, one by one (ApplyOnlyMe), and your arrow; OpenMap's icons and Questie's are placed right)
+    local hideMarks = Keep.combatMismatch
+    local viewFade = pinFade
     if math.abs(layer:GetAlpha() - db.pinOpacity * markFade * pinFade) > 0.001 then layer:SetAlpha(db.pinOpacity * markFade * pinFade) end
     layer:Show()
     -- (markers outside the zone's border: at the rest of the map's visibility; hidden at 0%, so they don't
@@ -1118,9 +1153,9 @@ local function ApplyOpacity()
     -- changes, else with the markers below)
     Zone.HookOMPins()
     local share = Zone.OutsideShare()
-    local omKey = tostring(Zone.zoneNow) .. " " .. share
+    local omKey = tostring(Zone.MarkZone()) .. " " .. share
     if Zone.omKey ~= omKey then Zone.omKey = omKey Zone.OMPinsApply(share) end
-    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * markFade * pinFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * markFade * pinFade) end
+    if math.abs(viewLayer:GetAlpha() - db.pinOpacity * markFade * viewFade) > 0.001 then viewLayer:SetAlpha(db.pinOpacity * markFade * viewFade) end
     viewLayer:Show()
     -- Going through every marker (with Questie, hundreds) is the costly part: only when there are new ones
     -- (Keep.pinsDirty: the map acquired a marker, an option changed, the map opened) and once a second as a
@@ -1146,6 +1181,8 @@ local function ApplyOpacity()
     -- ("My arrow doesn't fade": without the fade while moving, the other fades kept)
     local arrowFade = markFade
     if db.arrowNoFade and (Keep.moveFaded or 1) > 0.01 then arrowFade = fade / (Keep.moveFaded or 1) end
+    if hideMarks then arrowFade = 0 end -- (the game's arrow: out of place too; one of OpenMap's instead)
+    if hideMarks or Zone.fightArrow then Zone.FightArrow(hideMarks and compact and not Zone.shelved) end
     Zone.RaiseArrow(db.pinOpacity * arrowFade * pinFade)
 end
 
@@ -1346,7 +1383,15 @@ function Zone.PlayerZone()
         return game
     end
     local u, v = Zone.PlayerWorld()
-    if not u then return game end
+    if not u then
+        -- (where you are hidden for a moment: the outline you were in kept, in the same game zone)
+        Zone.whereHidden = GetTime()
+        if Zone.pzKey and Zone.pzKey:match("(%-?%d+)$") == tostring(game) then
+            Zone.pzOutside = Zone.pzOut
+            return Zone.pzZone
+        end
+        return game
+    end
     -- (worked out again only when you've moved a few yards or the game's zone changed)
     local key = string.format("%d %d %d", u * 20000, v * 20000, game)
     if Zone.pzKey == key then Zone.pzOutside = Zone.pzOut return Zone.pzZone end
@@ -1536,6 +1581,20 @@ end
 
 -- The zone to cut to (nil: none fits; Zone.why says why, for /omap debug)
 function Zone.MaskZone()
+    -- (the map opened in a fight with OpenMap: OpenMap can't put its view right till the fight ends, and the
+    -- outline came out a different size and place than the map under it. The whole map meanwhile, cut again
+    -- as the fight ends: Zone.AfterCombat)
+    if Keep.combatMismatch and not Zone.inFightZone then
+        -- (the zone the border would have, worked out all the same: the markers outside it still follow "Rest of the
+        -- map visibility", by where they are in the world, Zone.MarkZone)
+        Zone.inFightZone = true
+        local ok, zone = pcall(Zone.MaskZone)
+        Zone.inFightZone = nil
+        if (Zone.fightZone or false) ~= ((ok and zone) or false) then Keep.pinsDirty = true end
+        Zone.fightZone = ok and zone or nil
+        Zone.why = "opened in a fight: the border comes back as it ends"
+        return
+    end
     -- (inside a cave: the cave's own outline, as a cave can reach past its zone's, which cut it off; the
     -- whole map in one OpenMap has no place for)
     -- Only while the cave is big enough in the view (as a zone's outline): zoomed out to the zone, a cave is a
@@ -1755,7 +1814,13 @@ function Zone.SetNow()
 end
 
 -- How much of the outside of the zone shows (the rest of the map's visibility): 1 without a zone border
+-- The zone the markers are judged by: the border's, or in a fight without the border, the one it would have
+function Zone.MarkZone()
+    return Zone.zoneNow or (Keep.combatMismatch and Zone.fightZone) or nil
+end
+
 function Zone.OutsideShare()
+    if db.zoneBorder and not Zone.zoneNow and Keep.combatMismatch and Zone.fightZone then return db.zoneDim or 0 end
     if not (db.zoneBorder and Zone.zoneNow) then return 1 end
     return math.max(0, math.min(1, (Zone.level or 0) / 100))
 end
@@ -1775,7 +1840,7 @@ function Zone.PinLayer(pin)
     -- (the game's arrow (your party's dots with it: one marker), with "My arrow doesn't fade": on the arrow's
     -- layer, which isn't faded while you move)
     if db.arrowNoFade and pin.pinTemplate == "GroupMembersPinTemplate" then return Zone.ArrowPinLayer() end
-    if not (db.zoneBorder and Zone.zoneNow) then return layer end
+    if not (db.zoneBorder and Zone.MarkZone()) then return layer end
     -- (a path's marker always on the markers' layer, cut by the border there: Zone.pathsOnly. On the outside
     -- layer, all of it would go, the part inside your zone too)
     if pin.icon and pin.icon.type == "line" then return layer end
@@ -1794,6 +1859,19 @@ function Zone.PinOutside(pin)
     -- Forever, else the marker. A marker on the hidden outside layer has no place on screen: then it keeps
     -- the side it was on, or it went back and forth every second, flickering)
     local spot = (pin.icon and pin.icon.GetCenter) and pin.icon or pin
+    -- (opened in a fight: the map under the markers isn't at OpenMap's view, so where one is drawn says nothing.
+    -- Questie's keep their spot on the icon: judged by it; others as inside)
+    if Keep.combatMismatch and not Zone.zoneNow then
+        local icon = pin.icon
+        local S = _G.OpenMap and _G.OpenMap.MapStitch
+        if icon and icon.UiMapID and type(icon.x) == "number" and type(icon.y) == "number" and S and S.Rect then
+            local ok, l, r, t, b = pcall(S.Rect, icon.UiMapID)
+            if ok and l then
+                return Zone.WorldOutside(l + icon.x / 100 * (r - l), t + icon.y / 100 * (b - t)) and true or false
+            end
+        end
+        return false
+    end
     local x, y = spot:GetCenter()
     local cl, ct = content:GetLeft(), content:GetTop()
     local cw, ch = content:GetSize()
@@ -1862,20 +1940,22 @@ end
 -- zone's outline as drawn (or a capital's in it), or in a cave of the zone's (its quests are there, past the
 -- painted outline). Without the grid (an older Overlay Map file list), the game's own zone lines.
 function Zone.WorldOutside(u, v)
-    if type(Zone.zoneNow) == "string" then
-        local l, r, t, b = Zone.WorldRect(Zone.zoneNow)
+    local now = Zone.MarkZone()
+    if not now then return false end
+    if type(now) == "string" then
+        local l, r, t, b = Zone.WorldRect(now)
         return l and (u < l or u > r or v < t or v > b) or false
     end
-    local inOutline = Zone.InOutline(Zone.zoneNow, u, v)
+    local inOutline = Zone.InOutline(now, u, v)
     if inOutline ~= nil then
         if inOutline then return false end
-        for _, id in ipairs(Zone.Partners(Zone.zoneNow)) do
+        for _, id in ipairs(Zone.Partners(now)) do
             if Zone.InOutline(id, u, v) then return false end
         end
         if not Zone.CaveKeyAt(u, v) then return true end
     end
     local zone = Zone.Outlined(Zone.DeepestAt(u, v))
-    return not zone or Zone.Same(zone) ~= Zone.Same(Zone.zoneNow)
+    return not zone or Zone.Same(zone) ~= Zone.Same(now)
 end
 
 -- OpenMap's own icons (its quest "!" and "?", flight masters, dungeons, boats, your pins ...): on its icon layer,
@@ -1895,12 +1975,14 @@ end
 
 function Zone.OMPinLook(pin, share)
     local out = false
-    if share < 1 and type(pin.u) == "number" and type(pin.v) == "number" then
-        if pin.omU == pin.u and pin.omV == pin.v and pin.omZone == Zone.zoneNow and pin.omGen == Zone.omGen then
+    if Zone.omAllOut then -- (all of them hidden: the map opened in a fight, see ApplyOpacity)
+        out, share = true, 0
+    elseif share < 1 and type(pin.u) == "number" and type(pin.v) == "number" then
+        if pin.omU == pin.u and pin.omV == pin.v and pin.omZone == Zone.MarkZone() and pin.omGen == Zone.omGen then
             out = pin.omOut
         else
             out = Zone.WorldOutside(pin.u, pin.v) and true or false
-            pin.omU, pin.omV, pin.omZone, pin.omOut, pin.omGen = pin.u, pin.v, Zone.zoneNow, out, Zone.omGen
+            pin.omU, pin.omV, pin.omZone, pin.omOut, pin.omGen = pin.u, pin.v, Zone.MarkZone(), out, Zone.omGen
         end
     end
     if out then
@@ -1937,12 +2019,14 @@ Zone.omLines = setmetatable({}, { __mode = "k" })  -- [line] = true: every line 
 Zone.omLinesFaded = setmetatable({}, { __mode = "k" })
 function Zone.OMLineLook(line, share)
     local out = false
-    if share < 1 and line.omMidU then
-        if line.omZone == Zone.zoneNow and line.omGen == Zone.omGen and line.omMidKey == line.omMidU + line.omMidV then
+    if Zone.omAllOut then
+        out, share = true, 0
+    elseif share < 1 and line.omMidU then
+        if line.omZone == Zone.MarkZone() and line.omGen == Zone.omGen and line.omMidKey == line.omMidU + line.omMidV then
             out = line.omOut
         else
             out = Zone.WorldOutside(line.omMidU, line.omMidV) and true or false
-            line.omZone, line.omGen, line.omMidKey, line.omOut = Zone.zoneNow, Zone.omGen, line.omMidU + line.omMidV, out
+            line.omZone, line.omGen, line.omMidKey, line.omOut = Zone.MarkZone(), Zone.omGen, line.omMidU + line.omMidV, out
         end
     end
     if out then
@@ -1982,7 +2066,7 @@ function Zone.HookOMPins()
     local function judge(pin)
         if not pin then return end
         Zone.omPins[pin] = true
-        if compact and (Zone.omFaded[pin] or Zone.OutsideShare() < 1) then Zone.OMPinLook(pin, Zone.OutsideShare()) end
+        if compact and (Zone.omFaded[pin] or Zone.OutsideShare() < 1 or Zone.omAllOut) then Zone.OMPinLook(pin, Zone.OutsideShare()) end
     end
     hooksecurefunc(S, "AddPin", function(set) if type(set) == "table" and set.pins then judge(set.pins[#set.pins]) end end)
     hooksecurefunc(S, "MovePin", function(_, pin) judge(pin) end)
@@ -2840,6 +2924,8 @@ local function Follow(force, now)
         local x, y = PlayerOnMap(best)
         if not x then return end
         if not force and lastX and math.abs(x - lastX) < 1e-4 and math.abs(y - lastY) < 1e-4 then return end
+        -- (in combat OpenMap doesn't move its map: Center on me waits for the fight to end, as the fits do)
+        if InCombatLockdown() then return end
         lastX, lastY = x, y
         local u, v = api.WorldFromMap(best, x, y)
         -- (while the map zooms to fit a new zone, towards that zoom, not the one it's passing)
@@ -2875,12 +2961,8 @@ function Zone.Fit(zone, instant)
         local l, r, t, b = Zone.Box(zone)
         local api = _G.OpenMapAPI
         if not fit or not l then return end
-        local zoom = fit * Zone.FIT_MARGIN
-        local u, v = (l + r) / 2, (t + b) / 2
-        Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + Zone.GLIDE_TIME
-        local om = Zone.OpenMapModule()
-        if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
-        if api.ShowWorld then pcall(api.ShowWorld, u, v, zoom) end
+        if not api.ShowWorld then return end
+        Zone.ViewTo((l + r) / 2, (t + b) / 2, fit * Zone.FIT_MARGIN, instant) -- (after the fight, in combat)
         return
     end
     local map, c = Map(), Canvas()
@@ -3435,11 +3517,64 @@ function Zone.CaveMouthPins()
     if set.on ~= on then pcall(S.SetPinSetOn, set, on) end
 end
 
+-- Your arrow while the map is open in a fight without Ready in combat (Keep.combatMismatch): the game's own
+-- is out of place then (it follows the game's view, which OpenMap can't set up in a fight), OpenMap's icons
+-- aren't. So one of OpenMap's icons stands in for it, moved to where you are and turned as you face.
+Zone.FIGHT_ARROW = { texture = "Interface\\Minimap\\MinimapArrow", size = 28 }
+function Zone.FightArrow(on)
+    local S = _G.OpenMap and _G.OpenMap.MapStitch
+    if not (S and S.PinSet and S.AddPin and S.MovePin and S.SetPinSetOn) then return end
+    local f = Zone.fightArrow
+    if not on then
+        if f then f:Hide() if f.set then pcall(S.SetPinSetOn, f.set, false) end end
+        return
+    end
+    if not f then
+        f = CreateFrame("Frame")
+        Zone.fightArrow = f
+        local ok, set = pcall(S.PinSet, "overlaymapFightArrow", 0, 20)
+        if not ok or not set then return end
+        f.set = set
+        f:SetScript("OnUpdate", function(self, elapsed)
+            self.acc = (self.acc or 0) + elapsed
+            if self.acc < 0.05 then return end
+            self.acc = 0
+            local u, v = Zone.PlayerWorld()
+            if not u then if self.pin then self.pin:Hide() end return end
+            if not self.pin then
+                local okP, pin = pcall(S.AddPin, self.set, u, v, Zone.FIGHT_ARROW)
+                if not okP or not pin then return end
+                pin:EnableMouse(false)
+                self.pin = pin
+            else
+                pcall(S.MovePin, self.set, self.pin, u, v)
+                self.pin:Show()
+            end
+            local facing = GetPlayerFacing and GetPlayerFacing()
+            if type(facing) == "number" and not (issecretvalue and issecretvalue(facing)) then self.pin.Icon:SetRotation(facing) end
+            self.pin:SetAlpha(db.pinOpacity or 1)
+        end)
+    end
+    if f.set then pcall(S.SetPinSetOn, f.set, true) end
+    f:Show()
+end
+
 function Zone.CaveHere()
+    local was = Zone.caveKey
     Zone.caveKey = nil
     if not (IsIndoors and IsIndoors()) or not Zone.OpenMapStitched() then return end
     local u, v = Zone.PlayerWorld()
-    if not u then return end
+    if not u then
+        -- (where you are hidden from addons for a moment, as in some fights: still in the cave you were in, not
+        -- out of it, which fitted the zone and fitted the cave again once it was back)
+        Zone.whereHidden = GetTime()
+        local r = was and Zone.CaveRectOf(was)
+        if r then
+            Zone.caveKey = was
+            return r[1], r[2], r[3], r[4], was
+        end
+        return
+    end
     local key = Zone.CaveKeyAt(u, v)
     local r = key and Zone.CaveRectOf(key)
     if r then
@@ -3470,10 +3605,40 @@ end
 -- than the same fit as the map opens. Until the glide is done, or a few seconds)
 Zone.GLIDE_TIME = 4
 function Zone.ViewTo(u, v, zoom, instant)
+    -- (in combat OpenMap doesn't move its map: it keeps the view asked for till the fight ends, while saying it's
+    -- there already, so the border and the lines were laid for a view the map wasn't at. Kept here instead, and
+    -- asked for as combat ends: Zone.AfterCombat)
+    if InCombatLockdown() then
+        Zone.viewLater = { u, v, zoom }
+        return
+    end
+    Zone.viewLater = nil
     Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + Zone.GLIDE_TIME
     local om = Zone.OpenMapModule()
     if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
     pcall(_G.OpenMapAPI.ShowWorld, u, v, zoom)
+end
+
+function Zone.AfterCombat()
+    local w = Zone.viewLater
+    Zone.viewLater = nil
+    local mismatch = Keep.combatMismatch
+    Keep.combatMismatch = false
+    if Zone.fightZone then Zone.fightZone = nil Keep.pinsDirty = true end
+    Keep.CaveWheel()
+    if not compact or Zone.shelved then return end
+    -- (the game's markers, your arrow among them, laid out again on the view as it is: after a fight with the map
+    -- open, your arrow stayed away till the view moved, which Center on me doesn't with the mouse over the map)
+    local om, api = Zone.OpenMapModule(), _G.OpenMapAPI
+    if om and om.ShowNow and api and api.GetView then
+        local ok, u, v, z = pcall(api.GetView)
+        if ok and type(u) == "number" and type(z) == "number" then pcall(om.ShowNow, u, v, z) end
+    end
+    Keep.ApplyOnlyMe() -- (the game's quest markers back)
+    if mismatch then ApplyOpacity() end
+    if w then Zone.ViewTo(w[1], w[2], w[3]) end
+    if db.zoneBorder then ApplyEdges() end -- (the border, left off while the map was open in the fight)
+    if db.style == "outlines" then Outline.Place() end
 end
 
 function Zone.FitDungeon(id)
@@ -3679,6 +3844,8 @@ function Zone.CheckTown(instant, force, mine)
         Zone.townFor = nil
         return
     end
+    -- (where you are hidden for a moment: still in the town you were in, or out of one, till it's back)
+    if not Zone.PlayerWorld() then Zone.whereHidden = GetTime() return end
     if not Zone.towns then Zone.BuildTowns() return end
     local tu, tv = Zone.TownHere(Zone.townFor ~= nil)
     if tu then
@@ -3773,6 +3940,8 @@ Watch = function()
             if db.zoneBorder then ApplyEdges() end
         end
         if db.style == "outlines" then Outline.Place() end -- (into or out of a cave: its lines)
+        Keep.CaveWheel()
+        if not Zone.shelved then Keep.CheckPlace() end
         Zone.CheckPlaces()
         if Zone.live or db.liveMinimap then Zone.LiveMinimap() end -- (entered or left a dungeon with the map open)
         -- (OpenMap's dungeon map, opened a moment after the map)
@@ -3845,10 +4014,23 @@ end
 local function Save(f)
     if passSaved[f] then return end
     if SPLIT then
-        passSaved[f] = { f:IsMouseClickEnabled(), f:IsMouseMotionEnabled(),
-            f.IsMouseWheelEnabled and f:IsMouseWheelEnabled() }
+        -- (a marker hidden at the moment, its mouse off meanwhile: the mouse it had before, or putting this back
+        -- on close left it without tooltips, as after a map open through the end of a fight)
+        local hid = Keep.onlyHidden and Keep.onlyHidden[f]
+        local click, motion = f:IsMouseClickEnabled(), f:IsMouseMotionEnabled()
+        local wheel = f.IsMouseWheelEnabled and f:IsMouseWheelEnabled()
+        if hid and hid.motion ~= nil then motion = hid.motion end
+        -- (the map area: the mouse it had as the map opened, before Overlay Map changed it (kept unseen for a fight,
+        -- its mouse off; or the click through itself, laid again). Noted as it was then, putting it back on close
+        -- left the map unable to be moved, till a reload)
+        local o = f == Canvas() and Keep.canvasMouse
+        if o then click, motion, wheel = o[1], o[2], o[3] end
+        passSaved[f] = { click, motion, wheel }
     else
-        passSaved[f] = { f:IsMouseEnabled(), nil, f.IsMouseWheelEnabled and f:IsMouseWheelEnabled() }
+        local on, wheel = f:IsMouseEnabled(), f.IsMouseWheelEnabled and f:IsMouseWheelEnabled()
+        local o = f == Canvas() and Keep.canvasMouse
+        if o then on, wheel = o[1], o[3] end
+        passSaved[f] = { on, nil, wheel }
     end
 end
 
@@ -3955,6 +4137,7 @@ end
 -- the map and other addons set those up again now and then, which is undone the moment it
 -- happens, so nothing blinks.
 local onlyHidden = {}  -- frame -> { alpha, motion } it had
+Keep.onlyHidden = onlyHidden -- (for the click through's Save, further up)
 local onlyKeeping = false
 
 local function KeepOnlyHidden(f)
@@ -4089,6 +4272,18 @@ ApplyOnlyMe = function()
         ShowMarkers()
         return
     end
+    -- (opened in a fight with OpenMap: the game's own markers out of place till it ends, hidden; Questie's, placed
+    -- by OpenMap with its picture, stay. Keep.combatMismatch)
+    if Keep.FightQuests() and not db.onlyMe then
+        for template, pool in pairs(Map().pinPools or {}) do
+            -- (not your arrow's marker: hidden through its opacity, ApplyOpacity, so it comes back with it)
+            if not MAP_ART[template] and not template:find("HereBeDragons") and template ~= "GroupMembersPinTemplate"
+                and pool.EnumerateActive then
+                for pin in pool:EnumerateActive() do HideMarkerTree(pin, 2) end
+            end
+        end
+        return
+    end
     if not db.onlyMe then
         local folk = HideTownsfolkTwins()
         local quest = Keep.HideQuestTwins()
@@ -4110,6 +4305,7 @@ ApplyOnlyMe = function()
         end
     end
 end
+Keep.ApplyOnlyMe = function() ApplyOnlyMe() end
 
 -- Marker size. Each of the game's markers works out its own size (and then its place, which
 -- depends on it) whenever the map zooms; Overlay Map's size is added on top each time it does,
@@ -4377,7 +4573,7 @@ local function RestoreZoom()
     if not z then return end
     local api = OpenMapLoaded() and _G.OpenMapAPI
     if api and api.IsStitched and api.IsStitched() then
-        if not z.openmap then return end
+        if not z.openmap or InCombatLockdown() then return end -- (in combat OpenMap doesn't move its map)
         local ok, u, v = pcall(api.GetView)
         if not ok or not u then return end
         -- (the land at the size it had on screen, even if the map's width changed since)
@@ -4406,6 +4602,10 @@ local function Restore()
     StopFade()
     SaveZoom()
     compact = false
+    Keep.EscapeOn(false)
+    Keep.CaveWheel()
+    Keep.combatMismatch, Zone.omAllOut, Zone.fightZone = false, nil, nil
+    Zone.FightArrow(false)
     Zone.CaveMouthPins()
     Zone.Reset(true) -- (the outlines' pictures stay loaded for next time)
     Zone.lastZoom, Zone.zoomedAt = nil, nil -- (your own zoom counts only while the map is open)
@@ -4444,6 +4644,10 @@ local function Open()
     -- (closed in combat, so only made invisible: shown again)
     if map and compact and Zone.shelved then Zone.Unshelve(true) return end
     if not map or compact then return end
+    -- (the map area's mouse as the click through puts it back on close, Save: the game's map always takes the mouse
+    -- and its wheel. Noted from the map instead, a moment the map was kept unseen for a fight noted it off, and the
+    -- map couldn't be moved any more, till a reload; this also mends one left so)
+    Keep.canvasMouse = { true, true, true }
     Zone.opening = GetTime()
     local t0 = debugprofilestop()
     if map:IsShown() then return end -- already open the normal way: leave it alone
@@ -4481,6 +4685,10 @@ local function Open()
         -- places it itself anyway. Closed the same way, Close)
         ok = pcall(map.Show, map)
         Keep.directShown = ok and map:IsShown()
+        -- (OpenMap leaves the game's map as it is in a fight: its picture at its last view, the markers and the
+        -- border at the game's, the whole zone. Till the fight ends: no border, markers hidden if chosen)
+        Keep.combatMismatch = Keep.directShown and OpenMapLoaded() or false
+        Keep.markersDirty = true -- (the game's markers hidden on the next upkeep: ApplyOnlyMe)
         P.why = "shown directly (in combat)"
         small = nil
     elseif small then
@@ -4513,6 +4721,7 @@ local function Open()
     if not Zone.orig then Zone.orig = Zone.Measure(map) end
 
     compact = true
+    Keep.EscapeOn(true)
     before.alpha = map:GetAlpha()
     -- The map frame stays its full size around the smaller map area; it must not take clicks.
     before.mouse = map:IsMouseEnabled()
@@ -4560,26 +4769,9 @@ local function Open()
             pcall(fdj.RefreshWorldMapOverlay)
             Zone.Unframe()
         end
-        Zone.inCave = Zone.CaveHere() ~= nil -- (in a cave: no zone outline, see Zone.MaskZone)
-        -- (inside a dungeon: Dungeon Journal's map, even if it was left on the world map last time)
-        if Zone.InDungeon() then
-            Zone.HookJournal()
-            Zone.JournalBack()
-        end
-        RestoreZoom()
-        if db.zoneBorder and db.fitOpen and Zone.PlayerZone() then
-            Zone.fittedFor = Zone.PlayerZone()
-            Zone.Fit(Zone.fittedFor, true) -- (every time: fitted to your zone)
-        else
-            Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
-        end
-        -- (in a cave or a dungeon: fitted to it, over the zone)
-        Zone.CheckPlaces(true, db.zoneBorder and db.fitOpen)
-        -- (Follow Me: the view where it keeps it, from the start)
-        if db.follow then
-            lastX, lastY = nil, nil
-            Follow(true, true)
-        end
+        -- (already done as the fight started, Ready in combat: not asked again in the fight, which would only wait for
+        -- its end)
+        if not (InCombatLockdown() and Keep.readyViewAt and GetTime() - Keep.readyViewAt < 2) then Keep.OpeningView() end
         P2.zoom = debugprofilestop() - tm2
         settling = false
         tm2 = debugprofilestop()
@@ -4614,8 +4806,17 @@ end
 function Zone.Shelve()
     if Zone.shelved then return end
     Zone.shelved = true
+    Keep.EscapeOn(false)
     local c = Canvas()
-    Zone.shelfMouse = { c:IsMouseEnabled(), c.IsMouseWheelEnabled and c:IsMouseWheelEnabled() or false }
+    -- (its clicks and hover apart, as Click through sets them apart: one "mouse on or off" for both turned
+    -- hover off for good when Click through had the clicks off as it was kept away, and the map couldn't be
+    -- moved any more, till a reload)
+    if c.IsMouseClickEnabled and c.IsMouseMotionEnabled then
+        Zone.shelfMouse = { c:IsMouseClickEnabled(), c.IsMouseWheelEnabled and c:IsMouseWheelEnabled() or false,
+            c:IsMouseMotionEnabled() }
+    else
+        Zone.shelfMouse = { c:IsMouseEnabled(), c.IsMouseWheelEnabled and c:IsMouseWheelEnabled() or false }
+    end
     pcall(c.EnableMouse, c, false)
     pcall(c.EnableMouseWheel, c, false)
     Zone.MinimapBack()
@@ -4634,16 +4835,24 @@ function Zone.Unshelve(show)
     local c, m = Canvas(), Zone.shelfMouse
     Zone.shelfMouse = nil
     if m then
-        pcall(c.EnableMouse, c, m[1] and true or false)
+        if m[3] ~= nil and c.SetMouseClickEnabled then
+            pcall(c.SetMouseClickEnabled, c, m[1] and true or false)
+            pcall(c.SetMouseMotionEnabled, c, m[3] and true or false)
+        else
+            pcall(c.EnableMouse, c, m[1] and true or false)
+        end
         pcall(c.EnableMouseWheel, c, m[2] and true or false)
     end
-    if show and compact then ApplyLook() end
+    if show and compact then ApplyLook() Keep.EscapeOn(true) Keep.CaveWheel() end
 end
 
 local function Close()
     if not compact then return end
+    Keep.EscapeOn(false)
     local map = Map()
     if InCombatLockdown() and map:IsProtected() then Zone.Shelve() return end
+    -- (Ready in combat with OpenMap: kept, unseen, till the fight ends, so opening it again in the fight shows it set up)
+    if InCombatLockdown() and db.combatReady and OpenMapLoaded() and not Keep.combatMismatch then Zone.Shelve() return end
     -- (shown directly in combat: hidden directly too, the window system never having had it)
     if Keep.directShown or InCombatLockdown() then
         pcall(map.Hide, map)
@@ -4651,27 +4860,108 @@ local function Close()
     if map:IsShown() then
         if HideUIPanel then pcall(HideUIPanel, map) else map:Hide() end
     end
-    Keep.directShown = false
+    Keep.directShown, Keep.combatMismatch = false, false
     if map:IsShown() and InCombatLockdown() then Zone.Shelve() return end -- (refused without a word)
     Zone.Unshelve(false)
     Restore() -- in case hiding did not reach the OnHide hook
 end
+Keep.Close = Close
 
 -- Ready in combat (db.combatReady, off by default): in a group the game protects the map in combat (your
 -- party's markers on it), and an addon can't open it then. With this on, as combat starts (the last moment
 -- the game still allows it) the map is opened unseen, as if closed in combat (Zone.Shelve): the key shows it
 -- during the fight, and it closes for real as combat ends. Opening it costs a short stutter, so only when it
 -- would be blocked (solo the map opens in combat anyway) and only when chosen.
+-- In a fight with OpenMap, its own quest icons instead of the game's: always with Ready in combat, and when the map
+-- was opened in the fight without it (Otherwise hide markers in fights), where the game's would be out of place
+-- Escape: the game's window system closes the map with it, but not one shown in a fight (shown directly, outside
+-- that system) nor one kept for the fight (Ready in combat). A small frame of Overlay Map's on Escape's list
+-- while the map shows: Escape hides it, and that closes the map (in a fight: kept unseen, as the key does).
+function Keep.EscapeOn(on)
+    local e = Keep.escape
+    if not e then
+        if not on then return end
+        e = CreateFrame("Frame", "OverlayMapEscape", UIParent)
+        e:SetSize(1, 1)
+        e:Hide()
+        tinsert(UISpecialFrames, "OverlayMapEscape")
+        e:SetScript("OnHide", function()
+            if Keep.escQuiet then return end
+            if compact and not Zone.shelved and Keep.Close then Keep.Close() end
+        end)
+        Keep.escape = e
+    end
+    Keep.escQuiet = true
+    e:SetShown(on and true or false)
+    Keep.escQuiet = false
+end
+
+-- In a fight the game, not OpenMap, may move the map (in a cave, or once it's been set up for the fight), and its
+-- zoom changes the map underneath, which the border and the markers can't follow till the fight ends: the wheel
+-- off meanwhile (dragging stays)
+function Keep.CaveWheel()
+    local c = Canvas()
+    if not c or not c.EnableMouseWheel or (compact and Zone.shelved) then return end -- (kept unseen: its mouse is off anyway)
+    local off = compact and InCombatLockdown() and OpenMapLoaded() and true or false
+    -- (checked against the map as it is, not only what was set last: the click through puts the map's mouse back
+    -- as you hold Shift, the wheel with it)
+    if off then
+        if c:IsMouseWheelEnabled() then pcall(c.EnableMouseWheel, c, false) end
+        Keep.wheelOff = true
+    elseif Keep.wheelOff then
+        Keep.wheelOff = nil
+        pcall(c.EnableMouseWheel, c, true)
+    end
+end
+
+function Keep.FightQuests()
+    if not (compact and InCombatLockdown() and OpenMapLoaded()) then return false end
+    -- (not with Ready in combat: the game's are placed right then, and OpenMap leaves the quests of the map under its
+    -- picture to the game's markers, so hiding them left that zone without any)
+    return Keep.combatMismatch and true or false
+end
+
+-- The view as the map opens: your zoom kept, your zone or cave fitted, centred on you. A moment after the map shows,
+-- and with Ready in combat at once too, as the fight starts: a moment later the fight has begun, and OpenMap doesn't
+-- move its map in one, so the map stayed where OpenMap had left it
+function Keep.OpeningView()
+    Zone.inCave = Zone.CaveHere() ~= nil -- (in a cave: no zone outline, see Zone.MaskZone)
+    -- (inside a dungeon: Dungeon Journal's map, even if it was left on the world map last time)
+    if Zone.InDungeon() then
+        Zone.HookJournal()
+        Zone.JournalBack()
+    end
+    RestoreZoom()
+    if db.zoneBorder and db.fitOpen and Zone.PlayerZone() then
+        Zone.fittedFor = Zone.PlayerZone()
+        Zone.Fit(Zone.fittedFor, true) -- (every time: fitted to your zone)
+    else
+        Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
+    end
+    -- (in a cave or a dungeon: fitted to it, over the zone; in a cave, every time the map opens, whatever zoom
+    -- you left it at)
+    Zone.CheckPlaces(true, (db.zoneBorder and db.fitOpen) or Zone.inCave)
+    -- (Follow Me: the view where it keeps it, from the start)
+    if db.follow then
+        lastX, lastY = nil, nil
+        Follow(true, true)
+    end
+end
+
 function Keep.ReadyForCombat()
     Keep.readyNote = nil
     if not db or not db.combatReady or compact then return end
     local map = Map()
     if not map or map:IsShown() then return end
-    if not map:IsProtected() then Keep.readyNote = "not needed (the map isn't protected)" return end
+    -- (solo the map opens in a fight anyway, but with OpenMap its view can't be set up then: the markers and the
+    -- border came out of place, Keep.combatMismatch. Readied as the fight starts, it's set up)
+    if not map:IsProtected() and not OpenMapLoaded() then Keep.readyNote = "not needed (the map isn't protected)" return end
     if Wizard.frame and Wizard.frame:IsShown() then return end
     if InCombatLockdown() then Keep.readyNote = "too late: combat had already locked the map" return end
     Open()
     if compact then
+        pcall(Keep.OpeningView) -- (now, while the map can still be moved: see Keep.OpeningView)
+        Keep.readyViewAt = GetTime()
         Zone.Shelve()
         Keep.readyNote = "opened unseen as combat began"
     else
@@ -4694,7 +4984,8 @@ function OverlayMap_OnKey(keystate)
     if db.mode == "hold" then
         if keystate == "down" then Open() else Close() end
     elseif keystate == "down" then
-        if compact then Close() else Open() end
+        -- (kept unseen for a fight, Ready in combat or closed in one: the key shows it, not closes it again)
+        if compact and not Zone.shelved then Close() else Open() end
     end
 end
 
@@ -5655,7 +5946,6 @@ local function BuildPanel()
     PanelCycle(Row(32), "mode", "Key", Wizard.MODE_CHOICES)
     PanelCheck(Row(28), "clickThrough", "Click through the map (Shift: use it)")
     PanelCheck(Row(28), "follow", "Center on me")
-    PanelCheck(Row(28), "combatReady", "Ready in combat")
     Head("Places")
     Keep.PanelMulti(Row(30), "fitPlacesList", OpenMapLoaded() and "Auto-zoom" or "Auto-zoom (needs OpenMap)",
         Keep.PLACE_ITEMS, OpenMapLoaded)
@@ -6831,9 +7121,8 @@ function Keep.ListOptions()
         .. "OpenMap's own reopen option still decides where it's centred.")
     Slider("moveFade", "Fade while moving", "How much the map fades while you move. It comes back as you stop, "
         .. "or with the mouse over the map. 0%: it doesn't fade.", 0, 0.9, 0.05)
-    Settings.CreateCheckbox(P.cat, Register("combatReady", "Ready in combat"),
-        "In a group the game doesn't let an addon open the map in combat. With this on, the map gets ready, unseen, "
-        .. "as each fight starts, so your key works during it. Costs a short stutter as combat starts (only in a group).")
+    Settings.CreateCheckbox(P.cat, Register("combatReady", "Ready in combat (experimental)"),
+        "The map opens properly in fights. Costs a short stutter as each fight starts. In a fight the map can't be moved or zoomed, and may show a bit off its place.")
     Settings.CreateCheckbox(P.cat, Register("moveFadeFlight", "Not on flights"),
         "With Fade while moving: the map doesn't fade while you're on a flight.")
     Settings.CreateCheckbox(P.cat, Register("moveFadeCombat", "Also in combat"),
@@ -6905,7 +7194,7 @@ Keep.DESC = {
     opacity = "How see-through the map itself is. At 0%, only the markers show, floating over the world.",
     rememberZoom = "Opens at the zoom the map had when you last closed it, apart from the normal map's.",
     moveFade = "How much the map fades while you move. It comes back as you stop (or with the mouse over the map: Solid under the mouse). Off: it doesn't fade. While Overlay Map shows the map, OpenMap's own Fade while moving waits.",
-    combatReady = "In a group the game doesn't let an addon open the map in combat. With this on, the map gets ready, unseen, as each fight starts, so your key works during it. Costs a short stutter as each fight starts (only in a group; asks first). Solo the map opens in combat anyway.",
+    combatReady = "Experimental. The map opens properly in fights. Costs a short stutter as each fight starts. In a fight the map can't be moved or zoomed, and may show a bit off its place.",
     moveFadeFlight = "With Fade while moving: the map doesn't fade while you're on a flight.",
     moveFadeCombat = "With Fade while moving: the map stays faded all through a fight, also while you stand still. It comes back when combat ends.",
     moveFadeHover = "With Fade while moving: the map comes back while the mouse is over it (in full-screen overlay: over a marker, or with Shift held). Off: it stays faded while you move, wherever the mouse is.",
@@ -7239,7 +7528,6 @@ function Keep.BuildTabs(canvas, O)
     Head("Controls")
     Check("clickThrough", "Click through the map")
     Check("follow", "Center on me")
-    Check("combatReady", "Ready in combat")
     Head("Places")
     do
         local name = Keep.NeedsOMName("Auto-zoom")
@@ -7254,6 +7542,9 @@ function Keep.BuildTabs(canvas, O)
         O.rows[#O.rows].showIf = function() return db.fitTowns end
     end)
     Check("liveMinimap", "Minimap as map in dungeons")
+    -- (still being worked on: last in the tab, under its own title, and only here, not in the small panel)
+    Head("Experimental")
+    Check("combatReady", "Ready in combat")
     TabReset()
 
     tab = "Hide while open"
@@ -7432,8 +7723,15 @@ function Keep.BugReport(github)
         local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         title:SetPoint("TOPLEFT", 14, -12)
         title:SetText("Report a bug")
-        local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-        close:SetPoint("TOPRIGHT", -2, -2)
+        -- (the X in the corner, its pictures set here: the template's alone didn't show on this window)
+        local close = CreateFrame("Button", nil, f)
+        close:SetSize(30, 30)
+        close:SetPoint("TOPRIGHT", -3, -3)
+        close:SetFrameLevel(f:GetFrameLevel() + 20)
+        close:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
+        close:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
+        close:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight", "ADD")
+        close:SetScript("OnClick", function() f:Hide() end)
         local how = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         how:SetPoint("TOPLEFT", 14, -40)
         how:SetPoint("RIGHT", -14, 0)
@@ -7510,9 +7808,8 @@ function Keep.TurnOn(key)
     Keep.RefreshAll()
 end
 StaticPopupDialogs.OVERLAYMAP_COMBAT_READY = {
-    text = "Turn on \"Ready in combat\"?\n\nIn a group, the map will get ready, unseen, as each fight starts, so your key "
-        .. "can open it during the fight. This causes a short stutter (about a tenth of a second) at the start of every "
-        .. "fight while you're in a group.\n\nSolo it isn't needed: the map opens in combat anyway.",
+    text = "Turn on \"Ready in combat\" (experimental)?\n\nThe map opens properly in fights, but every fight starts with a short "
+        .. "stutter.\n\nIn a fight the map can't be moved or zoomed.",
     button1 = YES or "Yes",
     button2 = NO or "No",
     OnAccept = function(_, key) Keep.TurnOn(key) end,
@@ -7582,7 +7879,7 @@ function OverlayMap_Debug()
     end
     Say("debug. Client " .. tostring((select(4, GetBuildInfo()))) .. ", Overlay Map open: " .. tostring(compact))
     Say("Saved: size " .. f(db.scale) .. ", map " .. f(db.opacity) .. ", markers " .. f(db.pinOpacity)
-        .. ", overlay mode " .. tostring(db.overlay and true or false))
+        .. ", overlay mode " .. tostring(db.overlay and true or false) .. ", style " .. tostring(db.style))
     Say("Map frame: shown " .. try(map, "IsShown") .. ", scale " .. try(map, "GetScale")
         .. ", effective " .. try(map, "GetEffectiveScale") .. ", size " .. try(map, "GetSize")
         .. ", alpha " .. try(map, "GetAlpha"))
@@ -7699,7 +7996,13 @@ function OverlayMap_Debug()
             db.fitEnter and "entering " or "", db.fitOpen and "opening " or "", db.fitLeave and "leaving" or ""))
         Say("Flights: " .. (db.fitFlights and "on" or "off") .. "; on a flight now: " .. tostring(Zone.OnFlight()))
         Say("Ready in combat: " .. (db.combatReady and "on" or "off") .. (Keep.readyNote and ("; last fight: " .. Keep.readyNote) or "")
-            .. "; map protected now: " .. tostring(Map() and Map():IsProtected() and true or false))
+            .. "; map protected now: " .. tostring(Map() and Map():IsProtected() and true or false)
+            .. (Keep.combatMismatch and ("; opened in this fight without it: markers "
+                .. "replaced till it ends") or "")
+            .. ("; OpenMap's view " .. (function()
+                local ok, u, v, z = pcall(function() return _G.OpenMapAPI.GetView() end)
+                return ok and type(z) == "number" and string.format("%.3f, %.3f, zoom %.2f", u, v, z) or "?"
+            end)()))
         Say("Caves and dungeons: " .. (db.fitPlaces and "on" or "off") .. "; "
             .. (Zone.InDungeon() and ("in a dungeon, map " .. tostring(C_Map.GetBestMapForUnit("player")))
                 or u0 and "in a cave" or ("not in a cave" .. ((IsIndoors and IsIndoors()) and " (indoors)" or "")))
@@ -7710,7 +8013,8 @@ function OverlayMap_Debug()
                 and (" (its own shape " .. Zone.CaveShape(Zone.caveKey) .. ")")
                 or (_G.OverlayMap_ZoneBordersCaves and " (box: no shape for it)"
                     or " (box: the cave shapes of Zone Borders 1.1.0 aren't loaded)"))) or "")
-            .. (Zone.caveFor and ", cave fitted" or "") .. (Zone.dungeonFor and ", dungeon fitted" or ""))
+            .. (Zone.caveFor and ", cave fitted" or "") .. (Zone.dungeonFor and ", dungeon fitted" or "")
+            .. (Zone.whereHidden and string.format("; your position last hidden %.0f s ago", GetTime() - Zone.whereHidden) or ""))
         local n = Zone.caveNote
         if n then
             local okV, _, _, z = pcall(function() return _G.OpenMapAPI.GetView() end)
@@ -7973,16 +8277,19 @@ events:RegisterEvent("PLAYER_LOGOUT")
 events:SetScript("OnEvent", function(self, event, name)
     if event == "PLAYER_REGEN_DISABLED" then
         Keep.ReadyForCombat()
+        Keep.markersDirty = true -- (the map open as the fight starts: OpenMap's quest icons, Keep.FightQuests)
         ExtrasEnterCombat()
     elseif event == "PLAYER_REGEN_ENABLED" then
         ExtrasLeaveCombat()
         if Zone.shelved then Close() end -- (closed during combat: now for real)
+        C_Timer.After(0.1, Zone.AfterCombat) -- (a fit asked for in the fight: now, after OpenMap's own catch-up)
         if Wizard.afterCombat then
             Wizard.afterCombat = nil
             Wizard.Open()
         end
     elseif event == "MODIFIER_STATE_CHANGED" then
         if compact and db.clickThrough then ApplyClickThrough() end
+        if compact then Keep.CaveWheel() end
         if Zone.live then Zone.LiveMinimap() end
     elseif event == "ADDON_LOADED" and name == ADDON_NAME then
         -- Settings from when the addon was called Quick Map (its saved file renamed to OverlayMap.lua
