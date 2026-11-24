@@ -15,6 +15,7 @@ local DEFAULTS = {
     pinOpacity = 1,  -- opacity of the markers on it (quests, vendors, your arrow...)
     markerSize = 1,  -- size of the markers (the game's own setting for the map's markers)
     onlyMe = false,  -- hide every marker except your own arrow
+    caveMouths = true, -- a marker at each cave entrance Overlay Map knows (with OpenMap)
     arrowCustom = false, -- your own arrow at its own size and opacity (below)
     arrowSize = 1, arrowOpacity = 1,
     arrowNoFade = false, -- your arrow (and your party's) not faded with the map while you move (Fade while moving)
@@ -72,6 +73,9 @@ local iconLayers = {}
 local before = {}       -- the map's own scale and the map area's opacity before Overlay Map changed them
 
 local function Say(msg)
+    -- (while a bug report is being put together, Keep.BugReport: into the report, not the chat)
+    local cap = rawget(_G, "OVERLAYMAP_CAPTURE")
+    if cap then cap[#cap + 1] = msg return end
     DEFAULT_CHAT_FRAME:AddMessage("|cff66bbffOverlay Map:|r " .. msg)
 end
 
@@ -3368,6 +3372,9 @@ end
 function Zone.CaveFile(zone)
     local key = tonumber(zone:match("^cave(%-?%d+)$"))
     local S = _G.OpenMap and _G.OpenMap.MapStitch
+    -- (a cave map's own cut: Zone Borders' copy of OpenMap's, opened at the cave's entrances, else OpenMap's)
+    local own = key and key > 0 and _G.OverlayMap_ZoneBordersCaves and _G.OverlayMap_ZoneBordersCaves["map " .. key]
+    if own then return "Interface\\AddOns\\" .. Zone.ADDON .. "\\Cave\\" .. own end
     if key and key > 0 and S and S.CaveMasks then return S.CaveMasks .. key end
     local n = key and key < 0 and Zone.CaveShape(key)
     if n then return "Interface\\AddOns\\" .. Zone.ADDON .. "\\Cave\\" .. n .. (db.zoneSoft and "s" or "") end
@@ -3377,6 +3384,57 @@ function Zone.CaveFile(zone)
 end
 
 -- The cave you're in: its box (left, top, right, bottom) and key; Zone.caveKey keeps the key
+-- Cave entrances: a marker at each one Overlay Map knows (cavemouths.py: the caves with a Blizzard cave map,
+-- their entrance found on the cave map and checked against the zone's map under it), as OpenMap's own icons,
+-- in a set of OpenMap's (so they move, zoom and fade with the others), shown only while Overlay Map shows the
+-- map. { cave map, continent, x, y } (world yards)
+Zone.CAVE_MOUTHS = {
+    { 2, 1, -162.2, -4359.0 }, { 3, 1, -245.1, -5081.4 }, { 5, 1, 1474.1, -4870.2 }, { 6, 1, 808.5, -4751.2 },
+    { 8, 1, -2389.8, 302.3 }, { 9, 1, -1901.9, -1102.7 }, { 11, 1, -828.5, -2032.2 }, { 19, 0, 2856.4, -725.9 },
+    { 28, 0, -6043.1, 46.4 }, { 28, 0, -6226.8, 121.5 }, { 29, 0, -5623.3, -272.5 }, { 31, 0, -5725.7, -1684.8 },
+    { 33, 0, -7387.6, -1148.8 }, { 33, 0, -7731.7, -1082.7 }, { 38, 0, -9844.9, 205.6 }, { 40, 0, -9180.2, -597.5 },
+    { 53, 0, -10451.0, 1935.1 }, { 54, 0, -9976.9, 1455.8 }, { 55, 0, -11085.5, 1525.3 }, { 58, 1, 10753.3, 923.5 },
+    { 59, 1, 10043.2, 1035.5 }, { 79, 1, -7968.2, -1311.2 }, { 82, 1, -6304.8, 142.4 }, { 426, 0, -8673.2, -117.5 },
+    { 428, 0, -6525.5, 482.1 }, { 466, 0, 2047.6, 1819.1 }, { 470, 0, -5542.4, 590.6 },
+}
+Zone.MOUTH_LOOK = { texture = MEDIA .. "CaveEntrance", size = 18 }
+Zone.MOUTH_ZOOM = 2 -- (OpenMap's zoom from which they show: about a zone across, as its dungeon entrances)
+
+function Zone.MouthEnter(pin)
+    GameTooltip:SetOwner(pin, "ANCHOR_RIGHT")
+    GameTooltip:SetText(pin.caveName or "Cave")
+    GameTooltip:AddLine("Cave entrance", 1, 1, 1)
+    GameTooltip:Show()
+end
+
+function Zone.CaveMouthPins()
+    local OM = _G.OpenMap
+    local S = OM and OM.MapStitch
+    if not (S and S.PinSet and S.AddPin and S.FromYards and S.SetPinSetOn) then return end
+    local on = compact and db.caveMouths ~= false and Zone.OpenMapStitched()
+    local set = Zone.mouthSet
+    if not set then
+        if not on then return end
+        local ok, made = pcall(S.PinSet, "overlaymapCaveMouths", Zone.MOUTH_ZOOM)
+        if not (ok and made) then return end
+        set = made
+        Zone.mouthSet = set
+        for _, m in ipairs(Zone.CAVE_MOUTHS) do
+            local okY, u, v = pcall(S.FromYards, m[2], m[3], m[4])
+            if okY and type(u) == "number" and type(v) == "number" then
+                local okP, pin = pcall(S.AddPin, set, u, v, Zone.MOUTH_LOOK)
+                if okP and pin then
+                    local c = OM.MapCaves and OM.MapCaves[m[1]]
+                    pin.caveName = c and c[1] or "Cave"
+                    pin:SetScript("OnEnter", Zone.MouthEnter)
+                    pin:SetScript("OnLeave", GameTooltip_Hide)
+                end
+            end
+        end
+    end
+    if set.on ~= on then pcall(S.SetPinSetOn, set, on) end
+end
+
 function Zone.CaveHere()
     Zone.caveKey = nil
     if not (IsIndoors and IsIndoors()) or not Zone.OpenMapStitched() then return end
@@ -4239,6 +4297,7 @@ ApplyLook = function()
     Keep.pinsDirty, Keep.markersDirty = true, true -- (all the markers gone through again)
     Zone.CheckDownload() -- (Zone Border chosen without its download ready: asked, or told, at once)
     Outline.CheckDownload() -- (the same for the Outlines style)
+    Zone.CaveMouthPins() -- (on while Overlay Map shows the map, off when it closes)
     if not compact then return end
     local map = Map()
     Keep.MoveFade()
@@ -4347,6 +4406,7 @@ local function Restore()
     StopFade()
     SaveZoom()
     compact = false
+    Zone.CaveMouthPins()
     Zone.Reset(true) -- (the outlines' pictures stay loaded for next time)
     Zone.lastZoom, Zone.zoomedAt = nil, nil -- (your own zoom counts only while the map is open)
     local map = Map()
@@ -5010,6 +5070,7 @@ Keep.TIPS = {
     pinOpacity = "How see-through the markers are: quests, vendors, your arrow and other addons' icons.",
     markerSize = "Size of the markers, Questie's and OpenMap's icons too.",
     onlyMe = "Hides every marker except your own arrow.",
+    caveMouths = "A small marker at the entrance of caves and mines on the map (hover it for the name). Needs OpenMap.",
     style = "Standard, Torn parchment (torn, burnt paper edges) or Outlines (white lines of cliffs, water and roads; needs the Overlay Map: Outlines download).",
     edge = "The map fades out towards its edges, like other games' overlay maps. Standard style only.",
     shape = "The shape the map's edges fade into. With \"Fade at the edges\" off, it's cut sharp in that shape.",
@@ -5563,6 +5624,7 @@ local function BuildPanel()
     PanelSlider(Row(56), "markerSize", "Marker size", 0.5, 2.5, 0.05)
     PanelCheck(Row(28), "onlyMe", "Show only my arrow")
     PanelCheck(Row(28, Fading), "moveFadeMarkers", "Fade markers too")
+    PanelCheck(Row(28), "caveMouths", "Cave entrances", OpenMapLoaded, "Cave entrances (needs OpenMap)")
     Head("Your arrow")
     PanelCheck(Row(28), "arrowCustom", "Custom arrow size")
     Sub(function()
@@ -5613,9 +5675,16 @@ local function BuildPanel()
     local all = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     all:SetHeight(20)
     all:SetPoint("BOTTOMLEFT", 10, 10)
-    all:SetPoint("BOTTOMRIGHT", -10, 10)
+    all:SetPoint("BOTTOMRIGHT", panel, "BOTTOM", -3, 10)
     all:SetText("All options")
     all:SetScript("OnClick", function() SlashCmdList.OVERLAYMAP("") end)
+    local bug = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    bug:SetHeight(20)
+    bug:SetPoint("BOTTOMLEFT", panel, "BOTTOM", 3, 10)
+    bug:SetPoint("BOTTOMRIGHT", -10, 10)
+    bug:SetText("Report a bug")
+    bug:SetScript("OnClick", function() Keep.BugReport() end)
+    Keep.Tip(bug, nil, "A window with the link to report a bug and a report of your setup, ready to copy.")
 
     local TOP = 64 -- (the first row a little apart from the tabs' line)
     local function Layout()
@@ -6827,6 +6896,7 @@ end
 Keep.USE_TABS = true
 Keep.OPTION_TABS = { "General", "Markers", "Style", "Zone borders", "Behavior", "Hide while open", "Panel button" }
 Keep.DESC = {
+    bugReport = "Opens a window with the link to Overlay Map's CurseForge comments and a short report of your setup (versions, where you are, settings), ready to copy and paste in your comment.",
     fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
     overlay = "One switch for an overlay map: the map fills the whole screen, see-through and click-through, with solid markers and large soft edges. It keeps its own opacities, marker size, style and edges: what you change while it's on stays with it, and the normal map keeps its own.",
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next one hides it.",
@@ -6842,6 +6912,7 @@ Keep.DESC = {
     pinOpacity = "How see-through the markers are: quests, vendors, flight points, your arrow and other addons' markers.",
     markerSize = "Size of the markers, Questie's and OpenMap's icons too (on top of OpenMap's own Icon size).",
     onlyMe = "Hides every marker on the map except your own arrow. The map's picture stays.",
+    caveMouths = "A small marker at the entrance of caves and mines (hover it for the cave's name), for the caves Overlay Map knows the entrance of. Needs OpenMap.",
     arrowCustom = "Your arrow at a size and opacity of its own, apart from the other markers.",
     arrowNoFade = "With Fade markers too: your arrow (and your party's) stays as it is while the map and the other markers fade as you move.",
     moveFadeMarkers = "With Fade while moving: the markers fade with the map as you move. Off: only the map fades, as with Map opacity.",
@@ -7059,8 +7130,8 @@ function Keep.BuildTabs(canvas, O)
     local function Cycle(key, label, choices, enabledIf)
         PanelCycle(Row(32, key, label, enabledIf), key, label, choices, enabledIf)
     end
-    local function Buttons(list, enabledIf, label)
-        local f = Row(30, nil, label, enabledIf)
+    local function Buttons(list, enabledIf, label, key)
+        local f = Row(30, key, label, enabledIf)
         local w = (CONTROL - 20 - (#list - 1) * 6) / #list
         local made = {}
         for i, item in ipairs(list) do
@@ -7108,6 +7179,12 @@ function Keep.BuildTabs(canvas, O)
         Check("moveFadeCombat", "Also in combat", function() return (db.moveFade or 0) > 0 end)
         Check("moveFadeFlight", "Not on flights", function() return (db.moveFade or 0) > 0 end)
     end)
+    Head("Help")
+    do
+        Buttons({ { "Report a bug", function() Keep.BugReport() end,
+            "A window with the link to report a bug and a report of your setup, ready to copy." } }, nil,
+            "Report a bug help issue problem", "bugReport")
+    end
     TabReset()
 
     tab = "Markers"
@@ -7116,6 +7193,7 @@ function Keep.BuildTabs(canvas, O)
     Slider("markerSize", "Marker size", 0.5, 2.5, 0.05)
     Check("onlyMe", "Show only my arrow")
     Check("moveFadeMarkers", "Fade markers too", function() return (db.moveFade or 0) > 0 end)
+    Check("caveMouths", "Cave entrances", OpenMapLoaded, "Cave entrances (needs OpenMap)")
     Head("Your arrow")
     Check("arrowCustom", "Custom arrow size")
     Sub(function()
@@ -7290,6 +7368,130 @@ function Keep.BuildTabs(canvas, O)
         Keep.ScrollFit(sf, content)
     end
     O.Top()
+end
+
+-- Report a bug (/omap report, the small panel, the main options' General tab): an addon can't open a web page
+-- or copy to the clipboard, so a window shows the link to the CurseForge page's comments (where players
+-- report; GitHub's issues for those with an account) and a short report, both selected for Ctrl+C. The report
+-- says which versions, cave, zone and settings, so a "this cave looks wrong" comes with what's needed to find
+-- it; short, as a comment (the whole of /omap debug on request).
+Keep.BUG_URL = "https://www.curseforge.com/wow/addons/overlay-map/comments"
+Keep.BUG_URL_GH = "https://github.com/benja2030/Overlay-Map-WoW-Forever/issues/new"
+-- (the lines of /omap debug a report keeps)
+Keep.BUG_LINES = { "debug.", "Saved:", "Where you are:", "Caves and dungeons:", "Zone border:", "Towns:", "Flights:",
+    "Ready in combat:", "Last opening:", "Dungeon Journal:", "Map-related addons loaded:" }
+function Keep.BugText()
+    local lines = {}
+    _G.OVERLAYMAP_CAPTURE = lines
+    local ok, err = pcall(OverlayMap_Debug)
+    _G.OVERLAYMAP_CAPTURE = nil
+    if not ok then lines[#lines + 1] = "(debug stopped: " .. tostring(err) .. ")" end
+    local function Ver(name)
+        local get = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
+        local v = get and get(name, "Version")
+        return v and (name .. " " .. v) or nil
+    end
+    local head = { "Overlay Map bug report", date("%Y-%m-%d %H:%M") }
+    for _, name in ipairs({ ADDON_NAME, "OverlayMap_ZoneBorders", "OverlayMap_Outlines", "OpenMap", "Questie" }) do
+        local v = Ver(name)
+        if v then head[#head + 1] = v end
+    end
+    head = { table.concat(head, ", "), "What happened:", "" }
+    for _, l in ipairs(lines) do
+        local plain = l:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+        local keep = Keep.bugFull
+        if not keep then
+            for _, start in ipairs(Keep.BUG_LINES) do
+                if plain:find(start, 1, true) == 1 then keep = true break end
+            end
+        end
+        if keep then head[#head + 1] = plain end
+    end
+    return table.concat(head, "\n")
+end
+function Keep.BugReport(github)
+    local f = Keep.bugFrame
+    if not f then
+        f = CreateFrame("Frame", "OverlayMapBugReport", UIParent, "BackdropTemplate")
+        f:SetSize(520, 420)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("FULLSCREEN_DIALOG")
+        f:SetFrameLevel(9100)
+        f:SetToplevel(true)
+        f:SetClampedToScreen(true)
+        f:EnableMouse(true)
+        f:SetMovable(true)
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", f.StartMoving)
+        f:SetScript("OnDragStop", f.StopMovingOrSizing)
+        f:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 14, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+        f:SetBackdropColor(0.05, 0.045, 0.04, 0.97)
+        f:SetBackdropBorderColor(0.75, 0.55, 0.15, 0.9)
+        tinsert(UISpecialFrames, "OverlayMapBugReport")
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 14, -12)
+        title:SetText("Report a bug")
+        local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", -2, -2)
+        local how = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        how:SetPoint("TOPLEFT", 14, -40)
+        how:SetPoint("RIGHT", -14, 0)
+        how:SetJustifyH("LEFT")
+        how:SetText("1. Copy this link (Ctrl+C), open it in your browser and leave a comment there:")
+        local link = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+        link:SetHeight(22)
+        link:SetPoint("TOPLEFT", 20, -60)
+        link:SetPoint("RIGHT", -16, 0)
+        link:SetAutoFocus(false)
+        link:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        link:SetScript("OnTextChanged", function(self, user) if user then self:SetText(f.url or Keep.BUG_URL) self:HighlightText() end end)
+        link:SetScript("OnEscapePressed", function() f:Hide() end)
+        f.link = link
+        local how2 = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        how2:SetPoint("TOPLEFT", 14, -92)
+        how2:SetPoint("RIGHT", -14, 0)
+        how2:SetJustifyH("LEFT")
+        how2:SetText("2. Click in the report below, copy it (Ctrl+A, then Ctrl+C) and paste it in your comment, after "
+            .. "what happened. A screenshot helps too.")
+        local scroll = CreateFrame("ScrollFrame", "OverlayMapBugScroll", f, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 16, -130)
+        scroll:SetPoint("BOTTOMRIGHT", -34, 44)
+        -- (the whole of /omap debug, when asked for it)
+        local full = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+        full:SetSize(22, 22)
+        full:SetPoint("BOTTOMLEFT", 12, 12)
+        full.text = full:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        full.text:SetPoint("LEFT", full, "RIGHT", 2, 0)
+        full.text:SetText("Full report (when asked for it)")
+        full:SetScript("OnClick", function(self)
+            Keep.bugFull = self:GetChecked() and true or false
+            f.box:SetText(Keep.BugText())
+            f.box:SetCursorPosition(0)
+        end)
+        f.full = full
+        local gh = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        gh:SetPoint("BOTTOMRIGHT", -14, 18)
+        gh:SetText("Have a GitHub account? /omap github")
+        local box = CreateFrame("EditBox", nil, scroll)
+        box:SetMultiLine(true)
+        box:SetAutoFocus(false)
+        box:SetFontObject("ChatFontNormal")
+        box:SetWidth(460)
+        box:SetScript("OnEscapePressed", function() f:Hide() end)
+        box:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        scroll:SetScrollChild(box)
+        f.box = box
+    end
+    f.url = github and Keep.BUG_URL_GH or Keep.BUG_URL
+    f.link:SetText(f.url)
+    Keep.bugFull = false
+    f.full:SetChecked(false)
+    f.box:SetText(Keep.BugText())
+    f.box:SetCursorPosition(0)
+    f:Show()
+    f.link:SetFocus()
+    f.link:HighlightText()
 end
 
 -- Options that ask before going on (a cost people should know about), by their popup's name
@@ -7501,7 +7703,10 @@ function OverlayMap_Debug()
         Say("Caves and dungeons: " .. (db.fitPlaces and "on" or "off") .. "; "
             .. (Zone.InDungeon() and ("in a dungeon, map " .. tostring(C_Map.GetBestMapForUnit("player")))
                 or u0 and "in a cave" or ("not in a cave" .. ((IsIndoors and IsIndoors()) and " (indoors)" or "")))
-            .. (Zone.caveKey and (", cave " .. Zone.caveKey .. ((Zone.caveKey < 0 and Zone.CaveShape(Zone.caveKey))
+            .. (Zone.caveKey and Zone.caveKey > 0 and (", cave map " .. Zone.caveKey
+                .. ((_G.OverlayMap_ZoneBordersCaves and _G.OverlayMap_ZoneBordersCaves["map " .. Zone.caveKey])
+                    and " (entrance opened)" or "")) or "")
+            .. (Zone.caveKey and Zone.caveKey < 0 and (", cave " .. Zone.caveKey .. (Zone.CaveShape(Zone.caveKey)
                 and (" (its own shape " .. Zone.CaveShape(Zone.caveKey) .. ")")
                 or (_G.OverlayMap_ZoneBordersCaves and " (box: no shape for it)"
                     or " (box: the cave shapes of Zone Borders 1.1.0 aren't loaded)"))) or "")
@@ -7735,6 +7940,10 @@ SlashCmdList.OVERLAYMAP = function(msg)
     msg = (msg or ""):lower():match("^%s*(.-)%s*$")
     if msg == "debug" then
         OverlayMap_Debug()
+    elseif msg == "report" or msg == "bug" then
+        Keep.BugReport()
+    elseif msg == "github" then
+        Keep.BugReport(true)
     elseif msg == "move" then
         ShowMover()
     elseif msg == "names" then
