@@ -1,1 +1,6 @@
 CHANGELOG.md
+
+# Files Windows and macOS make on their own
+Thumbs.db
+desktop.ini
+.DS_Store

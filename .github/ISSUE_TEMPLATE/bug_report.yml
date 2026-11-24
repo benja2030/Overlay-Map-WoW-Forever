@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in Overlay Map doesn't work or looks wrong (a cave's lines, a zone's border, an error...)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead. For a cave or a zone that looks wrong, say which one.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report from the game
+      description: In the game, type /omap report (or click "Report a bug" in Overlay Map's panel or options), copy the report from the window (Ctrl+A, Ctrl+C) and paste it here.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: shots
+    attributes:
+      label: Screenshots
+      description: Drag pictures in here if you can (very helpful for a cave or a border that looks wrong).
+  - type: textarea
+    id: error
+    attributes:
+      label: Lua error
+      description: If the game showed an error, paste all of it here.
+      render: text
