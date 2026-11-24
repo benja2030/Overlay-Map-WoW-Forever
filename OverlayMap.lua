@@ -20,6 +20,9 @@ local DEFAULTS = {
     arrowNoFade = false, -- your arrow (and your party's) not faded with the map while you move (Fade while moving)
     moveFade = 0,    -- how much the map fades while you move (0: not at all, to 0.9)
     moveFadeHover = true, -- Fade while moving: the map solid again with the mouse over it
+    moveFadeCombat = false, -- Fade while moving: the same fade all through combat, moving or not
+    moveFadeFlight = false, -- Fade while moving: not on a flight (the map solid while you fly)
+    combatReady = false, -- in a group: the map opened unseen as combat starts, so the key works in the fight
     moveFadeMarkers = false, -- Fade while moving: the markers fade with the map (off: only the map, as Map opacity)
     hideMinimap = true, -- hide the minimap while the map is open
     follow = false,  -- keep the map centred on you while it's open, like the minimap
@@ -28,8 +31,9 @@ local DEFAULTS = {
     zoneBorder = false, -- the map cut to your zone's outline (on top of the shape and style)
     zoneSoft = true, -- the zone's outline faded in from the border (off: cut sharp)
     zoneDim = 0.3,   -- with the zone border: how much of the rest of the map shows (0: hidden; 5% steps)
-    zoneFitMode = "enter", -- with the zone border, the map zoomed to fit your zone: "off", "enter" (each
-                           -- new zone you enter) or "open" (that, and every time the map opens)
+    -- with the zone border, the map zoomed to fit your zone (Auto-zoom to zone, any of them): entering a new
+    -- zone, every time the map opens, leaving a town or capital (back to the zone around it)
+    fitEnter = true, fitOpen = false, fitLeave = true,
     keepZoomTime = 30, -- with Fit Zone: seconds your own zoom is kept before Fit Zone may zoom again (0: never kept)
     zoneView = false, -- with the zone border and OpenMap: the outline is the zone in the middle of the view
     zoneKeep = true, -- with the zone border and OpenMap: over the sea or land of no zone, the outline stays
@@ -41,6 +45,7 @@ local DEFAULTS = {
     rememberZoom = true, -- open at the zoom Overlay Map's map had when it last closed
     fitPlaces = true, -- caves (with OpenMap) and dungeons: zoomed to fit as you enter them
     fitTowns = true, -- towns (with OpenMap): zoomed in on as you enter them (a town: an innkeeper or flight master)
+    fitFlights = true, -- Auto-zoom to zone during flights too (each zone you fly into, flying out of a town)
     townSize = 400,  -- Auto-zoom towns: how many yards across the view shows
     liveMinimap = false, -- inside dungeons: the game's own minimap, big, in the map's place (with your arrow)
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
@@ -1276,6 +1281,8 @@ end
 -- and its zone count as the same place).
 Zone.CITY_ZONE = { [1455] = 1426, [1456] = 1412, [1457] = 1438, [1458] = 1420 } -- Ironforge, Thunder Bluff, Darnassus, Undercity
 Zone.SAME_PLACE = { [1453] = 1429, [1454] = 1411 } -- Stormwind in Elwynn Forest, Orgrimmar in Durotar
+function Zone.AnyFit() return db.fitEnter or db.fitOpen or db.fitLeave end
+function Zone.IsCity(id) return id ~= nil and (Zone.CITY_ZONE[id] or Zone.SAME_PLACE[id]) ~= nil end
 -- With OpenMap's whole world: a zone is outlined while it fills at least FILL_ON of the view (1: it
 -- just fits; the Whole Map When Zoomed Out option, db.zoneWhole), and keeps it until it fills less than
 -- FILL_OFF, 10% less (two values, so it doesn't switch back
@@ -1321,8 +1328,47 @@ function Zone.Outlined(id)
 end
 
 -- Where you are: the zone with an outline you're in (inside a capital, the city)
+-- The zone you're in, as the outlines show it (ZoneGrid.lua): the game's zone lines don't follow the painted
+-- outline (Dun Algaz is Wetlands to the game, past Wetlands' painted map), so walking out of the outline you
+-- were in the hidden part of the map until the game said you'd changed zone. Now: the game's zone while
+-- you're inside its outline (or a capital's in it); else the outline you're inside; inside none (a gap, the
+-- sea), nil, as the game gives for places with no outline ("Keep the border over the sea and between zones"
+-- keeps the one you had). Without the grid or OpenMap's world: the game's zone, as before.
 function Zone.PlayerZone()
-    return Zone.Outlined(C_Map.GetBestMapForUnit("player"))
+    local game = Zone.Outlined(C_Map.GetBestMapForUnit("player"))
+    local grid = _G.OverlayMapZoneGrid
+    Zone.pzOutside = false
+    if not (grid and game and Zone.OpenMapStitched and Zone.OpenMapStitched()) or Zone.inCave or (IsIndoors and IsIndoors()) then
+        return game
+    end
+    local u, v = Zone.PlayerWorld()
+    if not u then return game end
+    -- (worked out again only when you've moved a few yards or the game's zone changed)
+    local key = string.format("%d %d %d", u * 20000, v * 20000, game)
+    if Zone.pzKey == key then Zone.pzOutside = Zone.pzOut return Zone.pzZone end
+    local zone = game
+    local inGame = Zone.InOutline(game, u, v)
+    if inGame == false then
+        zone = nil
+        for _, id in ipairs(Zone.Partners(game)) do
+            if Zone.InOutline(id, u, v) then zone = game break end
+        end
+        -- (capitals first: a capital's outline lies inside its zone's)
+        for pass = 1, 2 do
+            if zone then break end
+            for id in pairs(grid) do
+                if id ~= game and (pass == 2) == not Zone.IsCity(id) and Zone.InOutline(id, u, v) then
+                    zone = id
+                    break
+                end
+            end
+        end
+    end
+    -- (on land the game gives a zone, outside every outline: you left the outline, the whole map shows, as
+    -- leaving a zone; "Keep the border over the sea and between zones" is for the sea and no-zone land)
+    Zone.pzKey, Zone.pzZone, Zone.pzOut = key, zone, zone == nil
+    Zone.pzOutside = Zone.pzOut
+    return zone
 end
 
 function Zone.OpenMapModule()
@@ -1445,8 +1491,9 @@ end
 function Zone.Clamp(u, v, zoom)
     -- (no outline, zoomed out to the whole map: just following you)
     if not db.zoneBorder or not (Zone.shown or Zone.want) then return u, v end
-    -- (on a flight, or in no outlined zone: just following you, so you don't leave the view)
-    if UnitOnTaxi("player") then return u, v end
+    -- (on a flight, or in no outlined zone: just following you, so you don't leave the view; with Auto-zoom
+    -- flights, kept to the zone fitted, as on foot)
+    if UnitOnTaxi("player") and not db.fitFlights then return u, v end
     local mine = Zone.PlayerZone()
     if not mine then return u, v end
     -- Kept inside the zone you're in, not the outline shown: entering a new zone, the outline takes
@@ -1514,7 +1561,7 @@ function Zone.MaskZone()
     local here = Zone.DeepestAt(u, v)
     -- From the zone in the middle of the view (or where you are), outwards: the first with an
     -- outline that's big enough in the view
-    local id = db.zoneView and here or C_Map.GetBestMapForUnit("player")
+    local id = db.zoneView and here or Zone.PlayerZone()
     local first, zone, tried = id, nil, nil
     for _ = 1, 6 do
         if not id then break end
@@ -1525,7 +1572,7 @@ function Zone.MaskZone()
         end
         id = Zone.Around(id)
     end
-    if not zone and not tried and db.zoneKeep then
+    if not zone and not tried and db.zoneKeep and not (Zone.pzOutside and not db.zoneView) then
         -- (nothing with an outline in the middle of the view, like the sea or a gap between zones:
         -- the zone it had, or yours, while still big enough in view, so the rest of the map stays
         -- at its opacity instead of the whole map coming back)
@@ -2692,9 +2739,23 @@ Keep.moveFader:SetScript("OnUpdate", function(self, elapsed)
         self:Hide()
         return
     end
+    -- (the game can hand these back as "secret" values, in combat on this client: comparing one is an error,
+    -- so a secret answer is left out and the next way asked)
+    local function Plain(v) return v ~= nil and not (issecretvalue and issecretvalue(v)) end
     local moving = false
-    if GetUnitSpeed then moving = (GetUnitSpeed("player") or 0) > 0 end
-    if not moving and IsPlayerMoving then moving = IsPlayerMoving() and true or false end
+    local speed = GetUnitSpeed and GetUnitSpeed("player")
+    if Plain(speed) then moving = speed > 0 end
+    if not moving and IsPlayerMoving then
+        local m = IsPlayerMoving()
+        if Plain(m) then moving = m and true or false end
+    end
+    -- ("Not on flights": a flight isn't moving, for the fade)
+    if moving and db.moveFadeFlight and UnitOnTaxi("player") then moving = false end
+    -- ("Also in combat": the fade held all through a fight, standing still too)
+    if not moving and db.moveFadeCombat then
+        local fight = UnitAffectingCombat("player")
+        if Plain(fight) and fight then moving = true end
+    end
     local hold = false
     if not db.moveFadeHover then
         hold = false -- (the mouse over the map doesn't stop the fade: "Solid under the mouse" off)
@@ -2779,6 +2840,11 @@ local function Follow(force, now)
         local u, v = api.WorldFromMap(best, x, y)
         -- (while the map zooms to fit a new zone, towards that zoom, not the one it's passing)
         local zoom = Zone.fitUntil and GetTime() < Zone.fitUntil and Zone.fitZoom or nil
+        if zoom then
+            -- (there already: Center on me back to the zoom it finds, so your own zoom isn't fought)
+            local okZ, _, _, cz = pcall(api.GetView)
+            if okZ and type(cz) == "number" and math.abs(cz - zoom) <= zoom * 0.01 then Zone.fitUntil = GetTime() + 0.2 end
+        end
         if u then u, v = Zone.Clamp(u, v, zoom) end
         if u and now then
             local om = Zone.OpenMapModule()
@@ -2807,7 +2873,7 @@ function Zone.Fit(zone, instant)
         if not fit or not l then return end
         local zoom = fit * Zone.FIT_MARGIN
         local u, v = (l + r) / 2, (t + b) / 2
-        Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + 1
+        Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + Zone.GLIDE_TIME
         local om = Zone.OpenMapModule()
         if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
         if api.ShowWorld then pcall(api.ShowWorld, u, v, zoom) end
@@ -2836,14 +2902,21 @@ function Zone.NoteZoom(z)
     Zone.lastZoom = z
 end
 
+-- Auto-zoom flights (db.fitFlights): Auto-zoom to zone also during a flight, each zone you fly into fitted to
+-- the map (with "Entering a zone"), and the zone fitted as you fly out of a town (with "Leaving a town or
+-- city"). Towns aren't zoomed into on the way (you're over them for seconds). Off: nothing until you land.
+function Zone.OnFlight() return UnitOnTaxi("player") and true or false end
+
 function Zone.CheckFit(instant)
-    -- (on a flight, not each zone you fly over: the one you land in, once you land)
-    if UnitOnTaxi("player") then return end
+    -- (on a flight: each zone you fly over with Auto-zoom flights; else the one you land in, once you land)
+    if Zone.OnFlight() and not db.fitFlights then return end
     local zone = Zone.PlayerZone()
     if not zone or zone == Zone.fittedFor then return end
     local first = Zone.fittedFor == nil
+    -- (out of a capital into another zone: "Leaving a town or city"; anything else: "Entering a zone")
+    local leaving = Zone.IsCity(Zone.fittedFor) and not Zone.IsCity(zone)
     Zone.fittedFor = zone
-    if first or db.zoneFitMode == "off" or not db.zoneBorder or not Zone.Available() then return end
+    if first or not (leaving and db.fitLeave or not leaving and db.fitEnter) or not db.zoneBorder or not Zone.Available() then return end
     -- (you zoomed the map yourself a moment ago: your zoom is kept)
     if not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KeepMyZoom() then return end
     Zone.Fit(zone, instant)
@@ -3334,8 +3407,12 @@ function Zone.ZoomForBox(l, r, t, b)
 end
 
 -- OpenMap's view to (u, v) at a zoom: at once (opening) or a glide
+-- (while the map glides to a zoom of Overlay Map's, Center on me heads for that zoom too: after a second it
+-- went back to the zoom passing by, and walking out of a town the glide stopped half-way, zoomed in further
+-- than the same fit as the map opens. Until the glide is done, or a few seconds)
+Zone.GLIDE_TIME = 4
 function Zone.ViewTo(u, v, zoom, instant)
-    Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + 1 -- (Follow Me heads for this zoom meanwhile)
+    Zone.fitZoom, Zone.fitUntil = zoom, GetTime() + Zone.GLIDE_TIME
     local om = Zone.OpenMapModule()
     if instant and om and om.ShowNow and pcall(om.ShowNow, u, v, zoom) then return end
     pcall(_G.OpenMapAPI.ShowWorld, u, v, zoom)
@@ -3375,7 +3452,7 @@ function Zone.LeaveCave(instant)
     local before = Zone.beforeCave
     Zone.beforeCave = nil
     local zone = Zone.PlayerZone()
-    if db.zoneBorder and db.zoneFitMode ~= "off" and zone and Zone.Available() then
+    if db.zoneBorder and db.fitEnter and zone and Zone.Available() then
         Zone.Fit(zone, instant)
         return
     end
@@ -3385,7 +3462,19 @@ end
 
 -- force: as the map opens with Fit Zone on each opening, the cave fitted again over the zone
 function Zone.CheckPlaces(instant, force)
-    if not (db.fitPlaces or db.fitTowns) or UnitOnTaxi("player") then return end
+    if Zone.OnFlight() then
+        -- (flying out of a town: back to the zone, with Auto-zoom flights; no town zoomed into on the way)
+        if Zone.townFor then
+            Zone.townFor, Zone.beforeTown = nil, nil
+            local zone = Zone.PlayerZone()
+            if db.fitFlights and db.fitLeave and db.zoneBorder and zone and Zone.Available() then
+                Zone.fittedFor = zone
+                Zone.Fit(zone, instant)
+            end
+        end
+        return
+    end
+    if not (db.fitPlaces or db.fitTowns) then return end
     local mine = not instant and Zone.zoomedAt and GetTime() - Zone.zoomedAt < Zone.KeepMyZoom()
     if Zone.InDungeon() then
         if not db.fitPlaces then return end
@@ -3551,7 +3640,7 @@ function Zone.CheckTown(instant, force, mine)
         Zone.beforeTown = nil
         if mine then return end
         local zone = Zone.PlayerZone()
-        if db.zoneBorder and db.zoneFitMode ~= "off" and zone and Zone.Available() then
+        if db.zoneBorder and db.fitLeave and zone and Zone.Available() then
             Zone.Fit(zone, instant)
             return
         end
@@ -3889,8 +3978,9 @@ local function HideTownsfolkTwins()
 end
 
 -- The game's own quest markers (a quest ready to turn in, its objective) where Questie draws one of its own
--- on the same spot: the game's hidden, Questie's kept. Exactly under Questie's, it didn't show, but with the
--- markers see-through both did, one over the other.
+-- on the same spot: Questie's hidden, the game's kept. Exactly under each other, only one showed, but with
+-- the markers see-through both did. The game's is the one kept: shift-click on it follows the quest (Questie's
+-- can't), and hiding it lost that.
 Keep.questTwin = setmetatable({}, { __mode = "k" })
 function Keep.HideQuestTwins()
     local twins = setmetatable({}, { __mode = "k" })
@@ -3899,34 +3989,36 @@ function Keep.HideQuestTwins()
     local quests = pools.QuestPinTemplate
     if not (quests and quests.EnumerateActive) then return false end
     local spots = {}
-    for template, pool in pairs(pools) do
-        if type(template) == "string" and template:find("HereBeDragons", 1, true) and pool.EnumerateActive then
-            for pin in pool:EnumerateActive() do
-                local icon = pin.icon
-                if icon and icon:IsShown() and not onlyHidden[icon] and not icon.isManualIcon then
-                    local x, y = icon:GetCenter()
-                    if x then
-                        local k = icon:GetEffectiveScale()
-                        spots[#spots + 1] = { x * k, y * k, icon:GetWidth() * k }
-                    end
-                end
+    for pin in quests:EnumerateActive() do
+        if pin:IsShown() then
+            local x, y = pin:GetCenter()
+            if x then
+                local k = pin:GetEffectiveScale()
+                spots[#spots + 1] = { x * k, y * k, pin:GetWidth() * k }
             end
         end
     end
     if #spots == 0 then return false end
     local any = false
-    for pin in quests:EnumerateActive() do
-        local x, y = pin:GetCenter()
-        if x then
-            local k = pin:GetEffectiveScale()
-            x, y = x * k, y * k
-            for _, sp in ipairs(spots) do
-                local reach = math.max(4, sp[3] * 0.5)
-                if math.abs(sp[1] - x) <= reach and math.abs(sp[2] - y) <= reach then
-                    twins[pin] = true
-                    HideMarker(pin)
-                    any = true
-                    break
+    for template, pool in pairs(pools) do
+        if type(template) == "string" and template:find("HereBeDragons", 1, true) and pool.EnumerateActive then
+            for pin in pool:EnumerateActive() do
+                local icon = pin.icon
+                if icon and icon:IsShown() and not icon.isManualIcon then
+                    local x, y = icon:GetCenter()
+                    if x then
+                        local k = icon:GetEffectiveScale()
+                        x, y = x * k, y * k
+                        for _, sp in ipairs(spots) do
+                            local reach = math.max(4, sp[3] * 0.5)
+                            if math.abs(sp[1] - x) <= reach and math.abs(sp[2] - y) <= reach then
+                                twins[icon] = true
+                                HideMarker(icon)
+                                any = true
+                                break
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -4186,7 +4278,8 @@ local DISPLAY_MINIMIZED_NO_LOG = 2
 
 local function Blocked()
     if InCombatLockdown() and Map():IsProtected() then
-        Say("The map can't be opened by an addon in combat right now.")
+        Say("The map can't be opened by an addon in combat right now"
+            .. (db.combatReady and "." or " (\"Ready in combat\" in the options lets your key open it in fights)."))
         return true
     end
 end
@@ -4321,7 +4414,16 @@ local function Open()
     -- game gives that state, as the map's minimize button does)
     local small = not Zone.smallFails and map.HandleUserActionMinimizeSelf
     local ok
-    if small then
+    Keep.directShown = false
+    if InCombatLockdown() then
+        -- (in combat the game's window system, which its own map key uses, refuses addons, without a word,
+        -- even with the map not protected: the map shown directly instead, outside that system; Overlay Map
+        -- places it itself anyway. Closed the same way, Close)
+        ok = pcall(map.Show, map)
+        Keep.directShown = ok and map:IsShown()
+        P.why = "shown directly (in combat)"
+        small = nil
+    elseif small then
         ok = pcall(small, map)
         if ok and map:IsShown() then
             local big = map.IsMaximized and map:IsMaximized()
@@ -4405,14 +4507,14 @@ local function Open()
             Zone.JournalBack()
         end
         RestoreZoom()
-        if db.zoneBorder and db.zoneFitMode == "open" and Zone.PlayerZone() then
+        if db.zoneBorder and db.fitOpen and Zone.PlayerZone() then
             Zone.fittedFor = Zone.PlayerZone()
             Zone.Fit(Zone.fittedFor, true) -- (every time: fitted to your zone)
         else
             Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
         end
         -- (in a cave or a dungeon: fitted to it, over the zone)
-        Zone.CheckPlaces(true, db.zoneBorder and db.zoneFitMode == "open")
+        Zone.CheckPlaces(true, db.zoneBorder and db.fitOpen)
         -- (Follow Me: the view where it keeps it, from the start)
         if db.follow then
             lastX, lastY = nil, nil
@@ -4482,10 +4584,39 @@ local function Close()
     if not compact then return end
     local map = Map()
     if InCombatLockdown() and map:IsProtected() then Zone.Shelve() return end
-    if HideUIPanel then HideUIPanel(map) else map:Hide() end
+    -- (shown directly in combat: hidden directly too, the window system never having had it)
+    if Keep.directShown or InCombatLockdown() then
+        pcall(map.Hide, map)
+    end
+    if map:IsShown() then
+        if HideUIPanel then pcall(HideUIPanel, map) else map:Hide() end
+    end
+    Keep.directShown = false
     if map:IsShown() and InCombatLockdown() then Zone.Shelve() return end -- (refused without a word)
     Zone.Unshelve(false)
     Restore() -- in case hiding did not reach the OnHide hook
+end
+
+-- Ready in combat (db.combatReady, off by default): in a group the game protects the map in combat (your
+-- party's markers on it), and an addon can't open it then. With this on, as combat starts (the last moment
+-- the game still allows it) the map is opened unseen, as if closed in combat (Zone.Shelve): the key shows it
+-- during the fight, and it closes for real as combat ends. Opening it costs a short stutter, so only when it
+-- would be blocked (solo the map opens in combat anyway) and only when chosen.
+function Keep.ReadyForCombat()
+    Keep.readyNote = nil
+    if not db or not db.combatReady or compact then return end
+    local map = Map()
+    if not map or map:IsShown() then return end
+    if not map:IsProtected() then Keep.readyNote = "not needed (the map isn't protected)" return end
+    if Wizard.frame and Wizard.frame:IsShown() then return end
+    if InCombatLockdown() then Keep.readyNote = "too late: combat had already locked the map" return end
+    Open()
+    if compact then
+        Zone.Shelve()
+        Keep.readyNote = "opened unseen as combat began"
+    else
+        Keep.readyNote = "couldn't open as combat began"
+    end
 end
 
 function OverlayMap_OnKey(keystate)
@@ -4871,6 +5002,7 @@ end
 
 -- Each option's line of help, shown when hovering it in the small panel and the setup wizard
 Keep.TIPS = {
+    moveFadeFlight = "With Fade while moving: the map doesn't fade while you're on a flight.",
     overlay = "The map fills the whole screen, see-through and click-through. It keeps settings of its own.",
     scale = "Size of the map. Applied when you let go of the slider.",
     width = "Width of the map compared to its usual shape (lower: more square). Applied when you let go.",
@@ -4886,10 +5018,15 @@ Keep.TIPS = {
     zoneBorder = "Cuts the map to your zone's outline (inside a cave, to the cave's).",
     zoneSoft = "The zone fades in from its border, instead of a sharp cut.",
     zoneDim = "How much of the map outside your zone shows. At 0% it's hidden.",
-    zoneFitMode = "Zooms the map so all of your zone fits: when you enter a zone, or also each time the map opens.",
+    zoneFit = "Zooms the map so all of your zone fits: when you enter a new zone, every time the map opens, or as you leave a town or capital. Choose any of them.",
+    fitEnter = "Each time you enter a new zone (not right after you zoomed the map yourself, nor during a flight).",
+    fitOpen = "Every time the map opens, instead of \"Open at last zoom\".",
+    fitLeave = "As you leave a town (Auto-zoom towns) or a capital, back out to all of the zone around it.",
     clickThrough = "Clicks go through the map to the world. Hold Shift to drag and zoom the map.",
     follow = "Keeps the map centred on you as you move. It holds still while the mouse is over the map.",
     fitPlaces = "Entering a cave or mine, the map zooms in on it, and back out as you leave.",
+    fitFlights = "Auto-zoom to zone during flights too: each zone you fly into fits the map, and flying out of a town fits its zone. Towns aren't zoomed into on the way. Off: the map waits until you land.",
+    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
     fitTowns = "Entering a town (a place with an innkeeper or flight master), the map zooms in on it, and back out as you leave.",
     townSize = "How much the map shows around a town it zooms in on, in yards across.",
     liveMinimap = "Inside dungeons, the game's own minimap (with your arrow) shown big in the map's place.",
@@ -4926,32 +5063,129 @@ end
 -- laid out again once you let go (Keep.ShapeSoon)
 -- (fmt: how its value reads, a percentage if none; parent.enabledIf: greyed out while it says no)
 Keep.SLIDER_TOP = 6
-local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape, fmt)
-    local function Show(fs, v) fs:SetText(fmt and fmt(v) or string.format("%d%%", v * 100 + 0.5)) end
-    -- (a little room above its name: apart from the option or line over it)
-    local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    text:SetPoint("TOPLEFT", 12, -Keep.SLIDER_TOP)
-    text:SetText(label)
-    local value = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    value:SetPoint("TOPRIGHT", -12, -Keep.SLIDER_TOP)
-    local s = CreateFrame("Slider", nil, parent)
-    s:SetOrientation("HORIZONTAL")
-    s:SetPoint("TOPLEFT", 12, -19 - Keep.SLIDER_TOP)
-    s:SetPoint("TOPRIGHT", -12, -19 - Keep.SLIDER_TOP)
-    s:SetHeight(14)
-    s:SetMinMaxValues(minValue, maxValue)
-    s:SetValueStep(step)
-    if s.SetObeyStepOnDrag then s:SetObeyStepOnDrag(true) end
+Keep.INDENT = 20
+
+-- An option that belongs to the one above it (shown only, or only usable, with it): moved in, with a
+-- small branch line from the left, as many games show sub-options (rows: indent set by the menu)
+function Keep.Branch(parent)
+    local ind = parent.indent or 0
+    if ind <= 0 or parent.branched then return ind end
+    parent.branched = true
+    local x = ind - 6
+    local v = parent:CreateTexture(nil, "ARTWORK")
+    v:SetColorTexture(0.75, 0.55, 0.15, 0.5)
+    v:SetWidth(1)
+    v:SetPoint("TOPLEFT", x, 2)
+    v:SetHeight(16)
+    local h = parent:CreateTexture(nil, "ARTWORK")
+    h:SetColorTexture(0.75, 0.55, 0.15, 0.5)
+    h:SetHeight(1)
+    h:SetWidth(7)
+    h:SetPoint("TOPLEFT", x, -14)
+    return ind
+end
+
+-- The game's own slider look (the thin bar and its diamond, as its settings and many addons have it), when
+-- this client has it; else the plain bar from before
+Keep.ATLAS_OK = {}
+function Keep.HasAtlas(name)
+    if Keep.ATLAS_OK[name] == nil then
+        Keep.ATLAS_OK[name] = (C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name)) and true or false
+    end
+    return Keep.ATLAS_OK[name]
+end
+function Keep.StyleSlider(s)
+    if Keep.HasAtlas("Minimal_SliderBar_Button") and Keep.HasAtlas("Minimal_SliderBar_Left")
+        and Keep.HasAtlas("_Minimal_SliderBar_Middle") and Keep.HasAtlas("Minimal_SliderBar_Right") then
+        local l = s:CreateTexture(nil, "BACKGROUND")
+        l:SetAtlas("Minimal_SliderBar_Left", true)
+        l:SetPoint("LEFT", 0, 0)
+        local r = s:CreateTexture(nil, "BACKGROUND")
+        r:SetAtlas("Minimal_SliderBar_Right", true)
+        r:SetPoint("RIGHT", 0, 0)
+        local m = s:CreateTexture(nil, "BACKGROUND")
+        m:SetAtlas("_Minimal_SliderBar_Middle", true)
+        m:SetPoint("LEFT", l, "RIGHT")
+        m:SetPoint("RIGHT", r, "LEFT")
+        local thumb = s:CreateTexture(nil, "ARTWORK")
+        thumb:SetAtlas("Minimal_SliderBar_Button", true)
+        s:SetThumbTexture(thumb)
+        return
+    end
     local track = s:CreateTexture(nil, "BACKGROUND")
     track:SetColorTexture(0.5, 0.4, 0.18, 1)
     track:SetPoint("LEFT"); track:SetPoint("RIGHT"); track:SetHeight(4)
     s:SetThumbTexture("Interface\\Buttons\\WHITE8X8")
     s:GetThumbTexture():SetSize(8, 14)
     s:GetThumbTexture():SetVertexColor(1, 0.85, 0.3, 1)
+end
+
+-- The arrows at each end of a slider: one step a click
+function Keep.Stepper(parent, side)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(16, 16)
+    local atlas = side == "left" and "Minimal_SliderBar_Button_Left" or "Minimal_SliderBar_Button_Right"
+    if Keep.HasAtlas(atlas) then
+        b:SetNormalAtlas(atlas)
+        b:SetHighlightAtlas(atlas, "ADD")
+        b:SetDisabledAtlas(atlas)
+        local d = b:GetDisabledTexture()
+        if d then d:SetDesaturated(true) d:SetAlpha(0.5) end
+    else
+        local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t:SetPoint("CENTER")
+        t:SetText(side == "left" and "<" or ">")
+        b:SetFontString(t)
+        b:SetNormalFontObject("GameFontNormal")
+        b:SetHighlightFontObject("GameFontHighlight")
+        b:SetDisabledFontObject("GameFontDisable")
+    end
+    return b
+end
+
+-- A slider row: its name and value above, the bar with an arrow at each end, and the lowest and highest
+-- values under its ends
+local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape, fmt)
+    local function Format(v) return fmt and fmt(v) or string.format("%d%%", v * 100 + 0.5) end
+    local function Show(fs, v) fs:SetText(Format(v)) end
+    local ind = Keep.Branch(parent)
+    -- (a little room above its name: apart from the option or line over it)
+    local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    text:SetPoint("TOPLEFT", 12 + ind, -Keep.SLIDER_TOP)
+    text:SetText(label)
+    local value = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    value:SetPoint("TOPRIGHT", -12, -Keep.SLIDER_TOP)
+    local barY = -19 - Keep.SLIDER_TOP
+    local back, fwd = Keep.Stepper(parent, "left"), Keep.Stepper(parent, "right")
+    back:SetPoint("TOPLEFT", 8 + ind, barY)
+    fwd:SetPoint("TOPRIGHT", -8, barY)
+    local s = CreateFrame("Slider", nil, parent)
+    s:SetOrientation("HORIZONTAL")
+    s:SetPoint("TOPLEFT", back, "TOPRIGHT", 2, 0)
+    s:SetPoint("TOPRIGHT", fwd, "TOPLEFT", -2, 0)
+    s:SetHeight(16)
+    s:SetMinMaxValues(minValue, maxValue)
+    s:SetValueStep(step)
+    if s.SetObeyStepOnDrag then s:SetObeyStepOnDrag(true) end
+    Keep.StyleSlider(s)
+    local low = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    low:SetPoint("TOPLEFT", s, "BOTTOMLEFT", 0, -1)
+    low:SetText(Format(minValue))
+    local high = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    high:SetPoint("TOPRIGHT", s, "BOTTOMRIGHT", 0, -1)
+    high:SetText(Format(maxValue))
+    -- (the row tall enough for all of it)
+    local need = Keep.SLIDER_TOP + 19 + 16 + 14
+    if (parent.height or 0) < need then parent.height = need parent:SetHeight(need) end
+    local function Nudge(by)
+        s:SetValue(math.max(minValue, math.min(maxValue, Round(s:GetValue(), step) + by * step)))
+    end
+    back:SetScript("OnClick", function() Nudge(-1) end)
+    fwd:SetScript("OnClick", function() Nudge(1) end)
+    Keep.Tip(back, key)
+    Keep.Tip(fwd, key)
     s:EnableMouseWheel(true)
-    s:SetScript("OnMouseWheel", function(self, delta)
-        self:SetValue(math.max(minValue, math.min(maxValue, self:GetValue() + delta * step)))
-    end)
+    s:SetScript("OnMouseWheel", function(self, delta) Nudge(delta) end)
     s:SetScript("OnValueChanged", function(self, v)
         v = Round(v, step)
         Show(value, v)
@@ -4960,7 +5194,7 @@ local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape
         db[key] = v
         if reshape then
             Keep.sizing = true -- (not laid out meanwhile: Watch)
-            -- (dragging: once you let go; the mouse wheel: a moment after the last turn)
+            -- (dragging: once you let go; the mouse wheel or the arrows: a moment after the last step)
             if not IsMouseButtonDown("LeftButton") then Keep.ShapeSoon(0.4) end
             return
         end
@@ -4976,6 +5210,8 @@ local function PanelSlider(parent, key, label, minValue, maxValue, step, reshape
         Show(value, db[key])
         local on = not parent.enabledIf or parent.enabledIf()
         if on then s:Enable() else s:Disable() end
+        back:SetEnabled(on)
+        fwd:SetEnabled(on)
         s:SetAlpha(on and 1 or 0.4)
         text:SetFontObject(on and "GameFontHighlight" or "GameFontDisable")
         value:SetFontObject(on and "GameFontNormal" or "GameFontDisable")
@@ -4984,9 +5220,10 @@ end
 
 -- enabledIf: greyed out while it says no, with offLabel and offTip (hovered) saying why
 local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
+    local ind = Keep.Branch(parent)
     local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
     cb:SetSize(24, 24)
-    cb:SetPoint("TOPLEFT", 8, 0)
+    cb:SetPoint("TOPLEFT", 8 + ind, 0)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     text:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     text:SetText(label)
@@ -4994,6 +5231,12 @@ local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
     cb:SetMotionScriptsWhileDisabled(true)
     Keep.Tip(cb, key)
     cb:SetScript("OnClick", function(self)
+        -- (some options ask before going on: Keep.ASK_ON, the box unticked until you say yes)
+        if self:GetChecked() and Keep.ASK_ON[key] and not db[key] then
+            self:SetChecked(false)
+            Keep.AskOn(key)
+            return
+        end
         db[key] = self:GetChecked() and true or false
         SyncOverlay()
         ApplyLook()
@@ -5010,12 +5253,116 @@ local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
     end
 end
 
+-- A list of switches in a drop-down: "Label: Choice, Choice  v", a click opens the list with a checkbox each
+-- (items: { key, label, short }), any number of them on. One list window, shared, closed by a click elsewhere
+-- or Escape.
+Keep.MULTI_W = 230
+function Keep.MultiMenu()
+    if Keep.multi then return Keep.multi end
+    local m = CreateFrame("Frame", "OverlayMapChecklist", UIParent, "BackdropTemplate")
+    m:SetFrameStrata("FULLSCREEN_DIALOG")
+    m:SetToplevel(true)
+    m:SetClampedToScreen(true)
+    m:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 14, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+    m:SetBackdropColor(0.05, 0.045, 0.04, 0.97)
+    m:SetBackdropBorderColor(0.75, 0.55, 0.15, 0.9)
+    m:EnableMouse(true)
+    m:Hide()
+    m.boxes = {}
+    tinsert(UISpecialFrames, "OverlayMapChecklist")
+    m:SetScript("OnEvent", function(self)
+        if self:IsShown() and not self:IsMouseOver() and not (self.owner and self.owner:IsMouseOver()) then self:Hide() end
+    end)
+    m:SetScript("OnShow", function(self) self:RegisterEvent("GLOBAL_MOUSE_DOWN") end)
+    m:SetScript("OnHide", function(self) self:UnregisterEvent("GLOBAL_MOUSE_DOWN") self.owner = nil end)
+    Keep.multi = m
+    return m
+end
+function Keep.OpenMulti(owner, items, onChange)
+    local m = Keep.MultiMenu()
+    if m:IsShown() and m.owner == owner then m:Hide() return end
+    for _, b in ipairs(m.boxes) do b:Hide() end
+    for i, item in ipairs(items) do
+        local b = m.boxes[i]
+        if not b then
+            b = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+            b:SetSize(24, 24)
+            b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            b.text:SetPoint("LEFT", b, "RIGHT", 2, 0)
+            m.boxes[i] = b
+        end
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", 8, -8 - (i - 1) * 26)
+        b.text:SetText(item[2])
+        b:SetChecked(db[item[1]] and true or false)
+        b:SetScript("OnClick", function(self)
+            db[item[1]] = self:GetChecked() and true or false
+            onChange()
+        end)
+        Keep.Tip(b, item[1])
+        b:Show()
+    end
+    m:SetSize(Keep.MULTI_W, 16 + #items * 26)
+    m:ClearAllPoints()
+    m:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+    m.owner = owner
+    -- (over the menu it opens from: in the same layer as the small panel, it was drawn under the panel's
+    -- own rows, the options below showing through it)
+    m:SetFrameStrata(owner:GetFrameStrata())
+    m:SetFrameLevel(math.min(9000, owner:GetFrameLevel() + 100))
+    m:Raise()
+    m:Show()
+end
+
+function Keep.PanelMulti(parent, tipKey, label, items, enabledIf)
+    local ind = Keep.Branch(parent)
+    local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    b:SetPoint("TOPLEFT", 8 + ind, 1)
+    b:SetPoint("TOPRIGHT", -8, 1)
+    b:SetHeight(24)
+    b:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
+    b:SetBackdropColor(1, 0.85, 0.3, 0.07)
+    b:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
+    b:GetHighlightTexture():SetAlpha(0.15)
+    local text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    text:SetPoint("LEFT", 8, 0)
+    text:SetPoint("RIGHT", -24, 0)
+    text:SetJustifyH("LEFT")
+    text:SetWordWrap(false)
+    local arrow = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    arrow:SetPoint("RIGHT", -8, 0)
+    arrow:SetText("v")
+    b:SetMotionScriptsWhileDisabled(true)
+    Keep.Tip(b, tipKey)
+    local function Words()
+        local on = {}
+        for _, item in ipairs(items) do if db[item[1]] then on[#on + 1] = item[3] or item[2] end end
+        return label .. ": " .. (#on > 0 and table.concat(on, ", ") or "Off")
+    end
+    local function Changed()
+        ApplyLook()
+        Keep.RefreshAll() -- (other rows may depend on it)
+        text:SetText(Words())
+    end
+    b:SetScript("OnClick", function(self) Keep.OpenMulti(self, items, Changed) end)
+    function parent:Refresh()
+        local on = not (enabledIf or parent.enabledIf) or (enabledIf or parent.enabledIf)()
+        b:SetEnabled(on)
+        text:SetText(Words())
+        text:SetFontObject(on and "GameFontHighlight" or "GameFontDisable")
+        arrow:SetFontObject(on and "GameFontNormal" or "GameFontDisable")
+        if not on and Keep.multi and Keep.multi.owner == b then Keep.multi:Hide() end
+    end
+end
+
 -- A choice among a few: "< Label: Choice >", the arrows (or a click on the text) stepping through them
 local function PanelCycle(parent, key, label, choices, enabledIf)
+    local ind = Keep.Branch(parent)
     local function Arrow(side)
         local b = CreateFrame("Button", nil, parent)
         b:SetSize(20, 22)
-        b:SetPoint(side == "left" and "TOPLEFT" or "TOPRIGHT", side == "left" and 10 or -10, 0)
+        b:SetPoint(side == "left" and "TOPLEFT" or "TOPRIGHT", side == "left" and 10 + ind or -10, 0)
         local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         t:SetPoint("CENTER", 0, 1)
         t:SetText(side == "left" and "<" or ">")
@@ -5028,7 +5375,7 @@ local function PanelCycle(parent, key, label, choices, enabledIf)
         return b
     end
     local back = CreateFrame("Frame", nil, parent, "BackdropTemplate")
-    back:SetPoint("TOPLEFT", 8, 1)
+    back:SetPoint("TOPLEFT", 8 + ind, 1)
     back:SetPoint("TOPRIGHT", -8, 1)
     back:SetHeight(24)
     back:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
@@ -5106,7 +5453,7 @@ local function PlacePanel()
     end
 end
 
-Keep.TABS = { "Map", "Markers", "Look", "Zone", "Behavior" }
+Keep.TABS = { "Map", "Markers", "Style", "Zone", "Behavior" } -- (named as the main options' tabs)
 Keep.PANEL_W = 300 -- (five tabs across)
 
 local function BuildPanel()
@@ -5163,78 +5510,97 @@ local function BuildPanel()
         x = x + w
     end
     local base = panel:CreateTexture(nil, "ARTWORK")
-    base:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+    base:SetColorTexture(0.75, 0.55, 0.15, 0.6) -- (3:1 against the panel: a line that groups things must be seen)
     base:SetHeight(1)
     base:SetPoint("TOPLEFT", 10, -52)
     base:SetPoint("TOPRIGHT", -10, -52)
 
-    local rows, tab = {}, nil
-    -- a row: a frame across the panel, `height` tall; shown on its tab when `when` (if any) says so
+    local rows, tab, indent = {}, nil, 0
+    -- a row: a frame across the panel, `height` tall; shown on its tab when `when` (if any) says so; moved in
+    -- under the option it belongs to while made inside Sub
     local function Row(height, when)
         local f = CreateFrame("Frame", nil, panel)
         f:SetHeight(height)
-        f.height, f.tab, f.when = height, tab, when
+        f.height, f.tab, f.when, f.indent = height, tab, when, indent
         f.Refresh = function() end
         rows[#rows + 1] = f
         return f
     end
+    local function Sub(make) indent = Keep.INDENT make() indent = 0 end
     local function Gap(h) Row(h) end
     -- a thin line between groups of rows (shown when `when` says so, as a row)
-    local function Line(when)
-        local f = Row(12, when)
-        local t = f:CreateTexture(nil, "ARTWORK")
-        t:SetColorTexture(0.75, 0.55, 0.15, 0.3)
-        t:SetHeight(1)
-        t:SetPoint("LEFT", 14, 0)
-        t:SetPoint("RIGHT", -14, 0)
+    -- a group's title, with the faint line after it (decoration, not held to 3:1)
+    local function Head(title, when)
+        local f = Row(26, when)
+        local t = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t:SetPoint("TOPLEFT", 12, -8)
+        t:SetText(title)
+        local line = f:CreateTexture(nil, "ARTWORK")
+        line:SetColorTexture(0.75, 0.55, 0.15, 0.3)
+        line:SetHeight(1)
+        line:SetPoint("LEFT", t, "RIGHT", 8, 0)
+        line:SetPoint("RIGHT", f, "RIGHT", -14, 0)
     end
 
     local function Fading() return (db.moveFade or 0) > 0 end
     tab = "Map"
-    -- (its size, then how it fades)
+    Head("Size")
     PanelCheck(Row(32), "overlay", "Full-screen overlay")
-    PanelSlider(Row(50, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
-    PanelSlider(Row(50, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
-    Line()
-    PanelSlider(Row(50), "opacity", "Map opacity", 0, 1, 0.05)
-    PanelSlider(Row(50), "moveFade", "Fade while moving", 0, 0.9, 0.05, nil,
+    PanelSlider(Row(56, NotOverlay), "scale", "Size", 0.3, 2.5, 0.05, true)
+    PanelSlider(Row(56, NotOverlay), "width", "Width", 0.5, 1.5, 0.05, true)
+    Head("Fading")
+    PanelSlider(Row(56), "opacity", "Map opacity", 0, 1, 0.05)
+    PanelSlider(Row(56), "moveFade", "Fade while moving", 0, 0.9, 0.05, nil,
         function(v) return v < 0.025 and "Off" or string.format("%d%%", v * 100 + 0.5) end)
-    PanelCheck(Row(28, Fading), "moveFadeHover", "Solid under the mouse")
+    Sub(function()
+        PanelCheck(Row(28, Fading), "moveFadeHover", "Solid under the mouse")
+        PanelCheck(Row(28, Fading), "moveFadeCombat", "Also in combat")
+        PanelCheck(Row(28, Fading), "moveFadeFlight", "Not on flights")
+    end)
     tab = "Markers"
-    -- (all the markers, then your arrow)
-    PanelSlider(Row(50), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
-    PanelSlider(Row(50), "markerSize", "Marker size", 0.5, 2.5, 0.05)
-    Line()
+    Head("All markers")
+    PanelSlider(Row(56), "pinOpacity", "Marker opacity", 0.1, 1, 0.05)
+    PanelSlider(Row(56), "markerSize", "Marker size", 0.5, 2.5, 0.05)
     PanelCheck(Row(28), "onlyMe", "Show only my arrow")
-    PanelCheck(Row(28), "arrowCustom", "Custom arrow size")
-    PanelSlider(Row(50, ArrowOwn), "arrowSize", "My arrow size", 0.5, 3, 0.05)
-    PanelSlider(Row(50, ArrowOwn), "arrowOpacity", "My arrow opacity", 0.1, 1, 0.05)
     PanelCheck(Row(28, Fading), "moveFadeMarkers", "Fade markers too")
+    Head("Your arrow")
+    PanelCheck(Row(28), "arrowCustom", "Custom arrow size")
+    Sub(function()
+        PanelSlider(Row(56, ArrowOwn), "arrowSize", "My arrow size", 0.5, 3, 0.05)
+        PanelSlider(Row(56, ArrowOwn), "arrowOpacity", "My arrow opacity", 0.1, 1, 0.05)
+    end)
     PanelCheck(Row(28, function() return Fading() and db.moveFadeMarkers end), "arrowNoFade", "My arrow doesn't fade")
-    tab = "Look"
+    tab = "Style"
     PanelCycle(Row(30), "style", "Style", STYLE_CHOICES)
-    PanelCycle(Row(30), "edge", "Fade at the edges", EDGE_CHOICES, StandardStyle)
-    PanelCycle(Row(34), "shape", "Edge shape", SHAPE_CHOICES, StandardStyle)
-    PanelSlider(Row(50, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
-    PanelSlider(Row(50, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
+    Sub(function()
+        PanelCycle(Row(30), "edge", "Fade at the edges", EDGE_CHOICES, StandardStyle)
+        PanelCycle(Row(34), "shape", "Edge shape", SHAPE_CHOICES, StandardStyle)
+        PanelSlider(Row(56, OutlineStyle), "outlineLines", "Line strength", 0.1, 1, 0.05)
+        PanelSlider(Row(56, OutlineStyle), "outlineBack", "Background darkness", 0, 1, 0.05)
+    end)
     tab = "Zone"
     local function ZoneOn() return db.zoneBorder and Zone.Installed() end
     PanelCheck(Row(28), "zoneBorder", "Apply borders to zones", Zone.Installed, "Apply borders to zones (needs download)",
         "Zone borders need the Overlay Map: Zone Borders addon, a separate download (from where you got "
         .. "Overlay Map). Install it next to Overlay Map and restart the game.")
-    PanelCheck(Row(30, ZoneOn), "zoneSoft", "Fade at the zone edges")
-    PanelSlider(Row(52, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
-    PanelCycle(Row(30, ZoneOn), "zoneFitMode", "Auto-zoom to zone", Wizard.FIT_CHOICES)
+    Sub(function()
+        PanelCheck(Row(30, ZoneOn), "zoneSoft", "Fade at the zone edges")
+        PanelSlider(Row(56, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
+        Keep.PanelMulti(Row(30, ZoneOn), "zoneFit", "Auto-zoom", Keep.FIT_ITEMS)
+    end)
     tab = "Behavior"
+    Head("Controls")
     PanelCycle(Row(32), "mode", "Key", Wizard.MODE_CHOICES)
     PanelCheck(Row(28), "clickThrough", "Click through the map (Shift: use it)")
     PanelCheck(Row(28), "follow", "Center on me")
-    PanelCheck(Row(28), "fitPlaces", "Auto-zoom caves", OpenMapLoaded, "Auto-zoom caves (needs OpenMap)",
-        "\"Auto-zoom caves\" needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
-    PanelCheck(Row(28), "fitTowns", "Auto-zoom towns", OpenMapLoaded, "Auto-zoom towns (needs OpenMap)",
-        "\"Auto-zoom towns\" needs OpenMap, whose map it zooms. Install OpenMap to use it.")
-    PanelSlider(Row(52, function() return OpenMapLoaded() and db.fitTowns end), "townSize", "Town zoom", 200, 1000, 50, nil,
-        function(v) return string.format("%d yd", v + 0.5) end)
+    PanelCheck(Row(28), "combatReady", "Ready in combat")
+    Head("Places")
+    Keep.PanelMulti(Row(30), "fitPlacesList", OpenMapLoaded() and "Auto-zoom" or "Auto-zoom (needs OpenMap)",
+        Keep.PLACE_ITEMS, OpenMapLoaded)
+    Sub(function()
+        PanelSlider(Row(56, function() return OpenMapLoaded() and db.fitTowns end), "townSize", "Town zoom", 200, 1000, 50, nil,
+            function(v) return string.format("%d yd", v + 0.5) end)
+    end)
     PanelCheck(Row(28), "liveMinimap", "Minimap as map in dungeons")
     panel.rows = rows
 
@@ -5303,7 +5669,18 @@ end
 Wizard.MODIFIERS = { LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true, LALT = true, RALT = true,
     LMETA = true, RMETA = true, UNKNOWN = true }
 Wizard.MOUSE = { MiddleButton = "BUTTON3", Button4 = "BUTTON4", Button5 = "BUTTON5" }
-Wizard.FIT_CHOICES = { { "off", "Off" }, { "enter", "When entering" }, { "open", "When entering or opening" } }
+-- (Auto-zoom to zone: when, any of them)
+-- (Auto-zoom places: which places, any of them)
+Keep.PLACE_ITEMS = {
+    { "fitPlaces", "Caves and mines", "Caves" },
+    { "fitTowns", "Towns", "Towns" },
+    { "fitFlights", "Zones on flights", "Flights" },
+}
+Keep.FIT_ITEMS = {
+    { "fitEnter", "Entering a zone", "Entering" },
+    { "fitOpen", "Opening the map", "Opening" },
+    { "fitLeave", "Leaving a town or city", "Leaving towns" },
+}
 Wizard.MODE_CHOICES = { { "hold", "Hold to show" }, { "press", "Toggle" } }
 Wizard.BOOKKEEPING = { "beforeOverlay", "overlaySet", "overlayActive" } -- (Overlay Mode's swapped settings)
 Wizard.DIM = 0.35 -- the key step: the map's strength until you press your key
@@ -5408,7 +5785,7 @@ function Wizard.Changed(key)
         ApplyEdges()
     end
     -- (Follow Me with Fit Zone: how the two go together)
-    if key == "follow" and db.follow and db.zoneBorder and db.zoneFitMode ~= "off" then
+    if key == "follow" and db.follow and db.zoneBorder and Zone.AnyFit() then
         StaticPopup_Show("OVERLAYMAP_FOLLOW_FIT")
     end
     -- (Zone Border turned on: the map glides to your zone, so you see it at once)
@@ -5645,7 +6022,7 @@ function Wizard.Build()
     f.stepText:SetPoint("TOPRIGHT", -14, -34)
     f.stepText:SetJustifyH("LEFT")
     local line = f:CreateTexture(nil, "ARTWORK")
-    line:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+    line:SetColorTexture(0.75, 0.55, 0.15, 0.6) -- (3:1 against the panel: a line that groups things must be seen)
     line:SetHeight(1)
     line:SetPoint("TOPLEFT", 12, -52)
     line:SetPoint("TOPRIGHT", -12, -52)
@@ -5755,7 +6132,7 @@ function Wizard.Build()
     PanelCheck(Wizard.Row(p, 28, ZoneOn), "zoneSoft", "Fade at the zone edges")
     Wizard.Note(p, "The zone fades in from its edge, instead of a sharp cut.", 24, ZoneOn)
     PanelSlider(Wizard.Row(p, 50, ZoneOn), "zoneDim", "Rest of map visibility", 0, 0.6, 0.05)
-    PanelCycle(Wizard.Row(p, 30, ZoneOn), "zoneFitMode", "Auto-zoom to zone", Wizard.FIT_CHOICES)
+    Keep.PanelMulti(Wizard.Row(p, 30, ZoneOn), "zoneFit", "Auto-zoom to zone", Keep.FIT_ITEMS)
     Wizard.Note(p, "Zooms the map so your whole zone fits, when you enter it (or also each time the "
         .. "map opens).", 30, ZoneOn)
 
@@ -6328,15 +6705,13 @@ function Keep.ListOptions()
             "The zone fades in from its border. Off: cut sharp."),
         Slider("zoneDim", "Rest of map visibility", "How much of the rest of the map shows behind your zone, "
             .. "which stands out. At 0% it's hidden.", 0, 0.6, 0.05),
-        Settings.CreateDropdown(P.cat, Register("zoneFitMode", "Auto-zoom to zone"), function()
-            local container = Settings.CreateControlTextContainer()
-            container:Add("off", "Off")
-            container:Add("enter", "When entering")
-            container:Add("open", "When entering or opening")
-            return container:GetData()
-        end, "Zooms the map so all of your zone fits. When entering: each time you enter a new zone or "
-            .. "city (not if you zoomed the map yourself a moment before, see \"Auto-zoom pause\", nor during a flight: when "
-            .. "you land). When entering or opening: also every time the map opens, instead of \"Open at last zoom\"."),
+        Settings.CreateCheckbox(P.cat, Register("fitEnter", "Auto-zoom to zone: entering a zone"),
+            "Zooms the map so all of your zone fits each time you enter a new zone (not right after you zoomed it "
+            .. "yourself, see \"Auto-zoom pause\", nor during a flight: when you land)."),
+        Settings.CreateCheckbox(P.cat, Register("fitOpen", "Auto-zoom to zone: opening the map"),
+            "Zooms the map so all of your zone fits every time the map opens, instead of \"Open at last zoom\"."),
+        Settings.CreateCheckbox(P.cat, Register("fitLeave", "Auto-zoom to zone: leaving a town or city"),
+            "Zooms back out to all of your zone as you leave a town (Auto-zoom towns) or a capital."),
         Settings.CreateCheckbox(P.cat, Register("zoneKeep", NeedsOM("Keep the border over the sea and between zones")),
             "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the "
             .. "outline you had stays (the rest of the map at \"Rest of map visibility\"). Off: the whole map shows there."),
@@ -6369,6 +6744,10 @@ function Keep.ListOptions()
         .. "the cave fills it, and back out when you leave (to your zone with \"Auto-zoom to zone\" and zone borders, else to the "
         .. "zoom you had). Works with zone borders or without it.")
     if fitInit and fitInit.AddModifyPredicate then fitInit:AddModifyPredicate(OpenMapLoaded) end
+    local flightInit = Settings.CreateCheckbox(P.cat, Register("fitFlights", NeedsOM("Auto-zoom flights")),
+        "Needs OpenMap. Auto-zoom to zone during flights too: each zone you fly into fits the map, and flying out "
+        .. "of a town fits its zone. Off: the map waits until you land.")
+    if flightInit and flightInit.AddModifyPredicate then flightInit:AddModifyPredicate(OpenMapLoaded) end
     local townInit = Settings.CreateCheckbox(P.cat, Register("fitTowns", NeedsOM("Auto-zoom towns")),
         "Needs OpenMap. Entering a town (a place with an innkeeper or flight master, not a capital), the map "
         .. "zooms in on it, and back out when you leave.")
@@ -6383,6 +6762,13 @@ function Keep.ListOptions()
         .. "OpenMap's own reopen option still decides where it's centred.")
     Slider("moveFade", "Fade while moving", "How much the map fades while you move. It comes back as you stop, "
         .. "or with the mouse over the map. 0%: it doesn't fade.", 0, 0.9, 0.05)
+    Settings.CreateCheckbox(P.cat, Register("combatReady", "Ready in combat"),
+        "In a group the game doesn't let an addon open the map in combat. With this on, the map gets ready, unseen, "
+        .. "as each fight starts, so your key works during it. Costs a short stutter as combat starts (only in a group).")
+    Settings.CreateCheckbox(P.cat, Register("moveFadeFlight", "Not on flights"),
+        "With Fade while moving: the map doesn't fade while you're on a flight.")
+    Settings.CreateCheckbox(P.cat, Register("moveFadeCombat", "Also in combat"),
+        "With Fade while moving: the map stays faded all through a fight, also while you stand still.")
     Settings.CreateCheckbox(P.cat, Register("moveFadeHover", "Solid under the mouse"),
         "With Fade while moving: the map comes back while the mouse is over it. Off: it stays faded while you move.")
     Settings.CreateCheckbox(P.cat, Register("hideMinimap", "Hide minimap"),
@@ -6441,6 +6827,7 @@ end
 Keep.USE_TABS = true
 Keep.OPTION_TABS = { "General", "Markers", "Style", "Zone borders", "Behavior", "Hide while open", "Panel button" }
 Keep.DESC = {
+    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
     overlay = "One switch for an overlay map: the map fills the whole screen, see-through and click-through, with solid markers and large soft edges. It keeps its own opacities, marker size, style and edges: what you change while it's on stays with it, and the normal map keeps its own.",
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next one hides it.",
     scale = "Size of the map. In full-screen overlay, the map fills the screen instead.",
@@ -6448,6 +6835,9 @@ Keep.DESC = {
     opacity = "How see-through the map itself is. At 0%, only the markers show, floating over the world.",
     rememberZoom = "Opens at the zoom the map had when you last closed it, apart from the normal map's.",
     moveFade = "How much the map fades while you move. It comes back as you stop (or with the mouse over the map: Solid under the mouse). Off: it doesn't fade. While Overlay Map shows the map, OpenMap's own Fade while moving waits.",
+    combatReady = "In a group the game doesn't let an addon open the map in combat. With this on, the map gets ready, unseen, as each fight starts, so your key works during it. Costs a short stutter as each fight starts (only in a group; asks first). Solo the map opens in combat anyway.",
+    moveFadeFlight = "With Fade while moving: the map doesn't fade while you're on a flight.",
+    moveFadeCombat = "With Fade while moving: the map stays faded all through a fight, also while you stand still. It comes back when combat ends.",
     moveFadeHover = "With Fade while moving: the map comes back while the mouse is over it (in full-screen overlay: over a marker, or with Shift held). Off: it stays faded while you move, wherever the mouse is.",
     pinOpacity = "How see-through the markers are: quests, vendors, flight points, your arrow and other addons' markers.",
     markerSize = "Size of the markers, Questie's and OpenMap's icons too (on top of OpenMap's own Icon size).",
@@ -6465,7 +6855,7 @@ Keep.DESC = {
     zoneBorder = "Cuts the map to the outline of your zone or city (inside a cave, the cave's). Needs the Overlay Map: Zone Borders download.",
     zoneSoft = "The zone fades in from its border. Off: cut sharp.",
     zoneDim = "How much of the rest of the map shows behind your zone. At 0% it's hidden.",
-    zoneFitMode = "Zooms the map so all of your zone fits: each time you enter a new zone, or also every time the map opens.",
+    zoneFit = "Zooms the map so all of your zone fits: each time you enter a new zone, every time the map opens, or as you leave a town or capital (back to the zone around it). Choose any of them.",
     keepZoomTime = "After you zoom the map yourself, how long auto-zoom leaves your zoom alone before it fits a new zone again. Off: auto-zoom always fits the zone you enter.",
     zoneKeep = "With OpenMap: while the middle of the view is over the sea or land that belongs to no zone, the border you had stays. Off: the whole map shows there.",
     zoneWhole = "With OpenMap: zoomed out until your zone fills less than this much of the view, the border goes and the whole map shows. Higher: sooner; lower: the border stays further out.",
@@ -6611,7 +7001,7 @@ function Keep.BuildTabs(canvas, O)
         O.tabs[name] = b
     end
     local base = canvas:CreateTexture(nil, "ARTWORK")
-    base:SetColorTexture(0.75, 0.55, 0.15, 0.4)
+    base:SetColorTexture(0.75, 0.55, 0.15, 0.6) -- (3:1 against the panel: a line that groups things must be seen)
     base:SetHeight(1)
     base:SetPoint("TOPLEFT", 16, tabY - 24)
     base:SetPoint("TOPRIGHT", -20, tabY - 24)
@@ -6625,11 +7015,11 @@ function Keep.BuildTabs(canvas, O)
 
     -- rows: a control on the left (CONTROL wide), its line of help on the right
     local CONTROL = 330
-    local tab
+    local tab, indent = nil, 0
     local function Row(height, key, label, enabledIf)
         local f = CreateFrame("Frame", nil, content)
         f:SetSize(CONTROL, height)
-        f.height, f.tab, f.key, f.enabledIf = height, tab, key, enabledIf
+        f.height, f.tab, f.key, f.enabledIf, f.indent = height, tab, key, enabledIf, indent
         f.Refresh = function() end
         local desc = key and (Keep.DESC[key] or Keep.TIPS[key])
         if desc then
@@ -6643,11 +7033,28 @@ function Keep.BuildTabs(canvas, O)
         O.rows[#O.rows + 1] = f
         return f
     end
+    -- (options made inside Sub belong to the one above: moved in, with a branch line)
+    local function Sub(make) indent = Keep.INDENT make() indent = 0 end
+    -- a group's title (hidden while searching: the matches are listed by tab)
+    local function Head(title)
+        local f = Row(24, nil, nil)
+        f.isHead = true
+        f.search = ""
+        local t = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t:SetPoint("TOPLEFT", 8, -4)
+        t:SetText(title)
+        local line = f:CreateTexture(nil, "ARTWORK")
+        line:SetColorTexture(0.75, 0.55, 0.15, 0.3)
+        line:SetHeight(1)
+        line:SetPoint("LEFT", t, "RIGHT", 8, 0)
+        line:SetPoint("RIGHT", content, "RIGHT", -8, 0)
+        f.line = line
+    end
     local function Check(key, label, enabledIf, offLabel, offTip)
         PanelCheck(Row(30, key, label, enabledIf), key, label, enabledIf, offLabel, offTip)
     end
     local function Slider(key, label, minValue, maxValue, step, enabledIf, reshape, fmt)
-        PanelSlider(Row(46, key, label, enabledIf), key, label, minValue, maxValue, step, reshape, fmt)
+        PanelSlider(Row(56, key, label, enabledIf), key, label, minValue, maxValue, step, reshape, fmt)
     end
     local function Cycle(key, label, choices, enabledIf)
         PanelCycle(Row(32, key, label, enabledIf), key, label, choices, enabledIf)
@@ -6682,62 +7089,92 @@ function Keep.BuildTabs(canvas, O)
     local function ZoneOM() return ZoneOn() and OpenMapLoaded() end
 
     tab = "General"
-    Check("overlay", "Full-screen overlay")
+    Head("Opening")
     Cycle("mode", "Key", Wizard.MODE_CHOICES)
+    Check("rememberZoom", "Open at last zoom")
+    Head("Size and place")
+    Check("overlay", "Full-screen overlay")
     Slider("scale", "Size", 0.3, 2.5, 0.05, NotOverlay, true)
     Slider("width", "Width", 0.5, 1.5, 0.05, NotOverlay, true)
-    Slider("opacity", "Map opacity", 0, 1, 0.05)
     Buttons({ { "Move the map", function() ShowMover() end, "Shows a box the size of the map: drag it, then right-click it when done." },
         { "Reset position", function() db.x, db.y = 0, 0 if mover and mover:IsShown() then ShowMover() end ApplyLook() end,
             "Puts the map back in the middle of the screen." } }, NotOverlay, "Move Reset position")
-    Check("rememberZoom", "Open at last zoom")
+    Head("Fading")
+    Slider("opacity", "Map opacity", 0, 1, 0.05)
     Slider("moveFade", "Fade while moving", 0, 0.9, 0.05, nil, nil,
         function(v) return v < 0.025 and "Off" or string.format("%d%%", v * 100 + 0.5) end)
-    Check("moveFadeHover", "Solid under the mouse", function() return (db.moveFade or 0) > 0 end)
+    Sub(function()
+        Check("moveFadeHover", "Solid under the mouse", function() return (db.moveFade or 0) > 0 end)
+        Check("moveFadeCombat", "Also in combat", function() return (db.moveFade or 0) > 0 end)
+        Check("moveFadeFlight", "Not on flights", function() return (db.moveFade or 0) > 0 end)
+    end)
     TabReset()
 
     tab = "Markers"
+    Head("All markers")
     Slider("pinOpacity", "Marker opacity", 0.1, 1, 0.05)
     Slider("markerSize", "Marker size", 0.5, 2.5, 0.05)
     Check("onlyMe", "Show only my arrow")
-    Check("arrowCustom", "Custom arrow size")
-    Slider("arrowSize", "My arrow size", 0.5, 3, 0.05, ArrowOwn)
-    Slider("arrowOpacity", "My arrow opacity", 0.1, 1, 0.05, ArrowOwn)
     Check("moveFadeMarkers", "Fade markers too", function() return (db.moveFade or 0) > 0 end)
+    Head("Your arrow")
+    Check("arrowCustom", "Custom arrow size")
+    Sub(function()
+        Slider("arrowSize", "My arrow size", 0.5, 3, 0.05, ArrowOwn)
+        Slider("arrowOpacity", "My arrow opacity", 0.1, 1, 0.05, ArrowOwn)
+    end)
     Check("arrowNoFade", "My arrow doesn't fade", function() return (db.moveFade or 0) > 0 and db.moveFadeMarkers end)
     TabReset()
 
     tab = "Style"
     Cycle("style", "Style", STYLE_CHOICES)
-    Cycle("edge", "Fade at the edges", EDGE_CHOICES, StandardStyle)
-    Cycle("shape", "Edge shape", SHAPE_CHOICES, StandardStyle)
-    Slider("outlineLines", "Line strength", 0.1, 1, 0.05, OutlineStyle)
-    Slider("outlineBack", "Background darkness", 0, 1, 0.05, OutlineStyle)
+    Sub(function()
+        Cycle("edge", "Fade at the edges", EDGE_CHOICES, StandardStyle)
+        Cycle("shape", "Edge shape", SHAPE_CHOICES, StandardStyle)
+        Slider("outlineLines", "Line strength", 0.1, 1, 0.05, OutlineStyle)
+        Slider("outlineBack", "Background darkness", 0, 1, 0.05, OutlineStyle)
+    end)
     TabReset()
 
     tab = "Zone borders"
+    Head("Border")
     Check("zoneBorder", "Apply borders to zones", Zone.Installed, "Apply borders to zones (needs download)",
         "Zone borders need the Overlay Map: Zone Borders addon, a separate download (from where you got "
         .. "Overlay Map). Install it next to Overlay Map and restart the game.")
-    Check("zoneSoft", "Fade at the zone edges", ZoneOn)
-    Slider("zoneDim", "Rest of map visibility", 0, 0.6, 0.05, ZoneOn)
-    Cycle("zoneFitMode", "Auto-zoom to zone", Wizard.FIT_CHOICES, ZoneOn)
-    Slider("keepZoomTime", "Auto-zoom pause", 0, 120, 5, function() return ZoneOn() and db.zoneFitMode ~= "off" end, nil,
-        function(v) return v < 0.5 and "Off" or string.format("%d s", v + 0.5) end)
+    Sub(function()
+        Check("zoneSoft", "Fade at the zone edges", ZoneOn)
+        Slider("zoneDim", "Rest of map visibility", 0, 0.6, 0.05, ZoneOn)
+        do
+            local f = Row(30, "zoneFit", "Auto-zoom to zone entering opening leaving town city", ZoneOn)
+            f.keys = { "fitEnter", "fitOpen", "fitLeave" }
+            Keep.PanelMulti(f, "zoneFit", "Auto-zoom to zone", Keep.FIT_ITEMS, ZoneOn)
+        end
+        Slider("keepZoomTime", "Auto-zoom pause", 0, 120, 5, function() return ZoneOn() and Zone.AnyFit() end, nil,
+            function(v) return v < 0.5 and "Off" or string.format("%d s", v + 0.5) end)
+    end)
+    Head("With OpenMap")
     Check("zoneKeep", Keep.NeedsOMName("Keep the border over the sea and between zones"), ZoneOM)
     Slider("zoneWhole", Keep.NeedsOMName("Show the whole map below this zone size"), 0.15, 0.85, 0.05, ZoneOM)
     Check("zoneView", Keep.NeedsOMName("Border the zone in the middle of the view"), ZoneOM)
     TabReset()
 
     tab = "Behavior"
+    Head("Controls")
     Check("clickThrough", "Click through the map")
     Check("follow", "Center on me")
-    Check("fitPlaces", "Auto-zoom caves", OpenMapLoaded, "Auto-zoom caves (needs OpenMap)",
-        "\"Auto-zoom caves\" needs OpenMap, which draws the caves and mines out in the world. Install OpenMap to use it.")
-    Check("fitTowns", "Auto-zoom towns", OpenMapLoaded, "Auto-zoom towns (needs OpenMap)",
-        "\"Auto-zoom towns\" needs OpenMap, whose map it zooms. Install OpenMap to use it.")
-    Slider("townSize", "Town zoom", 200, 1000, 50, function() return OpenMapLoaded() and db.fitTowns end, nil,
-        function(v) return string.format("%d yd", v + 0.5) end)
+    Check("combatReady", "Ready in combat")
+    Head("Places")
+    do
+        local name = Keep.NeedsOMName("Auto-zoom")
+        local f = Row(30, "fitPlacesList", name .. " caves mines towns flights", OpenMapLoaded)
+        f.keys = { "fitPlaces", "fitTowns", "fitFlights" }
+        Keep.PanelMulti(f, "fitPlacesList", name, Keep.PLACE_ITEMS, OpenMapLoaded)
+    end
+    Sub(function()
+        Slider("townSize", "Town zoom", 200, 1000, 50, function() return OpenMapLoaded() and db.fitTowns end, nil,
+            function(v) return string.format("%d yd", v + 0.5) end)
+        -- (shown only with towns ticked, not just greyed)
+        O.rows[#O.rows].showIf = function() return db.fitTowns end
+    end)
     Check("liveMinimap", "Minimap as map in dungeons")
     TabReset()
 
@@ -6791,8 +7228,9 @@ function Keep.BuildTabs(canvas, O)
         local descW = math.max(120, width - descX - 8)
         for _, f in ipairs(O.rows) do
             local shown
-            if q then shown = not f.isReset and f.search:find(q, 1, true) ~= nil
+            if q then shown = not f.isReset and not f.isHead and f.search:find(q, 1, true) ~= nil
             else shown = f.tab == db.optionsTab end
+            if shown and f.showIf and not f.showIf() then shown = false end
             f:SetShown(shown)
             if f.desc then f.desc:SetShown(shown) end
             if shown then
@@ -6815,7 +7253,8 @@ function Keep.BuildTabs(canvas, O)
                     f.sep:ClearAllPoints()
                     f.sep:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
                     f.sep:SetPoint("TOPRIGHT", content, "TOPRIGHT", -4, y)
-                    f.sep:SetShown(not firstInGroup)
+                    -- (none after a group's title, nor under it: the title starts the group)
+                    f.sep:SetShown(not firstInGroup and not f.isHead)
                 end
                 f:ClearAllPoints()
                 if f.isReset then
@@ -6833,8 +7272,13 @@ function Keep.BuildTabs(canvas, O)
                     f.desc:SetWidth(descW)
                     h = math.max(h, f.desc:GetStringHeight() + 4)
                 end
-                if not f.isReset then y = y - h - 12 end
-                firstInGroup = false
+                if f.isHead then
+                    y = y - h - 4
+                    firstInGroup = true
+                else
+                    if not f.isReset then y = y - h - 12 end
+                    firstInGroup = false
+                end
             elseif f.sep then
                 f.sep:Hide()
             end
@@ -6847,6 +7291,34 @@ function Keep.BuildTabs(canvas, O)
     end
     O.Top()
 end
+
+-- Options that ask before going on (a cost people should know about), by their popup's name
+Keep.ASK_ON = { combatReady = "OVERLAYMAP_COMBAT_READY" }
+function Keep.AskOn(key)
+    local dialog = StaticPopup_Show(Keep.ASK_ON[key], nil, nil, key)
+    -- (over the small panel, which sits above the game's usual popup layer)
+    if dialog then
+        dialog:SetFrameStrata("FULLSCREEN_DIALOG")
+        dialog:SetFrameLevel(9000)
+    end
+end
+function Keep.TurnOn(key)
+    db[key] = true
+    ApplyLook()
+    Keep.RefreshAll()
+end
+StaticPopupDialogs.OVERLAYMAP_COMBAT_READY = {
+    text = "Turn on \"Ready in combat\"?\n\nIn a group, the map will get ready, unseen, as each fight starts, so your key "
+        .. "can open it during the fight. This causes a short stutter (about a tenth of a second) at the start of every "
+        .. "fight while you're in a group.\n\nSolo it isn't needed: the map opens in combat anyway.",
+    button1 = YES or "Yes",
+    button2 = NO or "No",
+    OnAccept = function(_, key) Keep.TurnOn(key) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
 
 StaticPopupDialogs.OVERLAYMAP_RESET_TAB = {
     text = "Put the options on the %s tab back to their defaults?",
@@ -6863,9 +7335,13 @@ StaticPopupDialogs.OVERLAYMAP_RESET_TAB = {
 function Keep.ResetTab(name)
     local shape = false
     for _, f in ipairs(Keep.options.rows) do
-        if f.tab == name and f.key and DEFAULTS[f.key] ~= nil then
-            if f.key == "scale" or f.key == "width" then shape = true end
-            db[f.key] = DEFAULTS[f.key]
+        if f.tab == name then
+            for _, k in ipairs(f.keys or { f.key }) do
+                if DEFAULTS[k] ~= nil then
+                    if k == "scale" or k == "width" then shape = true end
+                    db[k] = DEFAULTS[k]
+                end
+            end
         end
     end
     if name == "General" then db.x, db.y = 0, 0 end
@@ -7016,6 +7492,12 @@ function OverlayMap_Debug()
                 near and string.format("%d", near) or "?", tu and "in a town" or "not in a town",
                 Zone.townNote and (Zone.townNote.mine and ", kept your zoom" or "") or ""))
         end
+        Say(string.format("Where you are: the game says %s, the outlines say %s; auto-zoom to zone: %s%s%s",
+            tostring(C_Map.GetBestMapForUnit("player")), tostring(Zone.PlayerZone()),
+            db.fitEnter and "entering " or "", db.fitOpen and "opening " or "", db.fitLeave and "leaving" or ""))
+        Say("Flights: " .. (db.fitFlights and "on" or "off") .. "; on a flight now: " .. tostring(Zone.OnFlight()))
+        Say("Ready in combat: " .. (db.combatReady and "on" or "off") .. (Keep.readyNote and ("; last fight: " .. Keep.readyNote) or "")
+            .. "; map protected now: " .. tostring(Map() and Map():IsProtected() and true or false))
         Say("Caves and dungeons: " .. (db.fitPlaces and "on" or "off") .. "; "
             .. (Zone.InDungeon() and ("in a dungeon, map " .. tostring(C_Map.GetBestMapForUnit("player")))
                 or u0 and "in a cave" or ("not in a cave" .. ((IsIndoors and IsIndoors()) and " (indoors)" or "")))
@@ -7281,6 +7763,7 @@ events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("PLAYER_LOGOUT")
 events:SetScript("OnEvent", function(self, event, name)
     if event == "PLAYER_REGEN_DISABLED" then
+        Keep.ReadyForCombat()
         ExtrasEnterCombat()
     elseif event == "PLAYER_REGEN_ENABLED" then
         ExtrasLeaveCombat()
@@ -7313,11 +7796,16 @@ events:SetScript("OnEvent", function(self, event, name)
                 t.shape, t.zoneBorder, t.zoneSoft = "rect", true, (t.edge or 0) > 0
             end
         end
-        -- (the two fit options are one now)
-        if db.zoneFitMode ~= "off" and db.zoneFitMode ~= "enter" and db.zoneFitMode ~= "open" then
-            if db.zoneFitOpen then db.zoneFitMode = "open"
-            elseif db.zoneFit == false then db.zoneFitMode = "off"
-            else db.zoneFitMode = "enter" end
+        -- (the two fit options became one choice, now a list of when: entering, opening, leaving a town or city)
+        if db.zoneFitMode == nil and (db.zoneFitOpen ~= nil or db.zoneFit ~= nil) then
+            db.zoneFitMode = db.zoneFitOpen and "open" or (db.zoneFit == false and "off") or "enter"
+        end
+        if db.zoneFitMode ~= nil then
+            local mode = db.zoneFitMode
+            db.fitEnter = mode ~= "off"
+            db.fitOpen = mode == "open"
+            db.fitLeave = mode ~= "off" -- (leaving a town fitted the zone with any of the old choices)
+            db.zoneFitMode = nil
         end
         db.zoneFit, db.zoneFitOpen = nil, nil
         if db.zoneViewOff == nil then db.zoneView, db.zoneViewOff = false, true end -- (a test version had it on)
