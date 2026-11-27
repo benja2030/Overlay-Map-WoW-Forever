@@ -7704,6 +7704,7 @@ function Keep.BugReport(github)
     local f = Keep.bugFrame
     if not f then
         f = CreateFrame("Frame", "OverlayMapBugReport", UIParent, "BackdropTemplate")
+        Keep.bugFrame = f -- (made once: opened again, the same window)
         f:SetSize(520, 420)
         f:SetPoint("CENTER")
         f:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -8179,7 +8180,13 @@ function OverlayMap_Debug()
         end
     end
     Say("Markers: " .. pins .. " in " .. pools .. " kinds, map area scale " .. f(Canvas() and Canvas():GetScale()) .. ", " .. #kinds .. " kinds shown:")
-    for i = 1, math.min(#kinds, 12) do DEFAULT_CHAT_FRAME:AddMessage("   " .. kinds[i]) end
+    -- (an indented line, without the "Overlay Map:" in front; into the bug report while one is put together)
+    local function Line(msg)
+        local cap = rawget(_G, "OVERLAYMAP_CAPTURE")
+        if cap then cap[#cap + 1] = msg return end
+        DEFAULT_CHAT_FRAME:AddMessage(msg)
+    end
+    for i = 1, math.min(#kinds, 12) do Line("   " .. kinds[i]) end
     local list = {}
     local num = (C_AddOns and C_AddOns.GetNumAddOns or GetNumAddOns)()
     for i = 1, num do
@@ -8229,7 +8236,7 @@ function OverlayMap_Debug()
         Say("Under the mouse, and what holds it:")
         local fr, n = f1, 0
         while fr and n < 7 do
-            DEFAULT_CHAT_FRAME:AddMessage("   " .. string.rep("  ", n) .. Describe(fr))
+            Line("   " .. string.rep("  ", n) .. Describe(fr))
             fr, n = fr:GetParent(), n + 1
         end
     else
