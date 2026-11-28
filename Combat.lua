@@ -96,6 +96,7 @@ function Zone.Shelve()
     Zone.MinimapBack()
     ApplyOpacity()
     if ns.mapButton then ns.mapButton:Hide() end
+    if Keep.closeButton then Keep.closeButton:Hide() end
     if ns.panel then ns.panel:Hide() end
     -- (what's hidden while the map is open comes back, as if it had closed)
     ShowMinimap()

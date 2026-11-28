@@ -56,6 +56,8 @@ local DEFAULTS = {
     fitTowns = true, -- towns (with OpenMap): zoomed in on as you enter them (a town: an innkeeper or flight master)
     fitFlights = true, -- Auto-zoom to zone during flights too (each zone you fly into, flying out of a town)
     townSize = 400,  -- Auto-zoom towns: how many yards across the view shows
+    fitArrow = false, -- Auto-zoom: the map zoomed in on your arrow as it opens (with OpenMap)
+    arrowZoom = 600, -- Auto-zoom my arrow: how many yards across the view shows
     liveMinimap = false, -- inside dungeons: the game's own minimap, big, in the map's place (with your arrow)
     clickThrough = false, -- the mouse goes through the map to the world (hold Shift to use the map)
     overlay = false, -- overlay mode: big, in the middle, see-through, soft edges
@@ -69,6 +71,8 @@ local DEFAULTS = {
     -- other addons on the map while Overlay Map shows it (Addons.lua): off, kept off it till the map closes
     showQuestie = true, showWaypoints = true, showOpenMap = true, showOpenMapIcons = true, showDungeonJournal = true,
     buttonCorner = "TOPRIGHT", -- the map's corner it sits in: TOPRIGHT, TOPLEFT, BOTTOMRIGHT, BOTTOMLEFT
+    sticky = false, -- Sticky map: the map stays open till its X is clicked (not the key, not Escape)
+    stickyCorner = "TOPLEFT", -- the map's corner the X sits in (beside the panel button if it's the same one)
     x = 0, y = 0,    -- position of the map's centre, from the centre of the screen
 }
 ns.DEFAULTS = DEFAULTS
@@ -294,17 +298,62 @@ local HIDE_GROUPS = {
         "ChatFrameChannelButton", "ChatFrameToggleVoiceDeafenButton", "ChatFrameToggleVoiceMuteButton",
         "QuickJoinToastButton" }, chat = true },
     { key = "hideQuests", label = "Quest tracker", frames = { "ObjectiveTrackerFrame", "Questie_BaseFrame" } },
-    { key = "hideBuffs", label = "Buffs and debuffs", frames = { "BuffFrame", "DebuffFrame" } },
+    { key = "hideBuffs", label = "Buffs and debuffs", frames = { "BuffFrame", "DebuffFrame",
+        "EnhanceQoLCustomBuffFrameAnchor", "EnhanceQoLCustomDebuffFrameAnchor" }, auras = true }, -- (+ Keep.AuraFrames)
     { key = "hideMenu", label = "Menu and bags", frames = { "MicroMenuContainer", "MicroMenu", "BagsBar" } },
     { key = "hideXP", label = "Experience bar", frames = { "MainStatusTrackingBarContainer",
         "SecondaryStatusTrackingBarContainer", "StatusTrackingBarManager", "SmoothExperienceBarFrame" } },
 }
 ns.HIDE_GROUPS = HIDE_GROUPS
 
+-- Other addons' buffs and debuffs (their own icons in place of the game's, or beside them): frames of their own on
+-- the screen (UIParent's), named for buffs or auras, as most such addons name them, or the game's own kind of aura
+-- frame (AuraContainer, named or not). Not tooltips, WeakAuras (all its displays are on one frame) or anything
+-- nearly as big as the screen. Looked for once each opening (addons may make
+-- theirs late); each found is kept hidden as an addon's frame is (Keep.ADDON_FRAMES).
+-- (the game keeps some of its frames from addons, forbidden: even asking their name is an error, so those are left
+-- out first, and every look at a frame is guarded)
+Keep.AURA_SKIP = { BuffFrame = true, DebuffFrame = true }
+local function AuraFrameOf(f, uw, uh)
+    if f.IsForbidden and f:IsForbidden() then return end
+    local name = f.GetName and f:GetName()
+    local kind = f.GetObjectType and f:GetObjectType()
+    local aura = kind == "AuraContainer"
+    if not aura and type(name) == "string" and kind ~= "GameTooltip" then
+        local low = name:lower()
+        aura = (low:find("buff", 1, true) or low:find("aura", 1, true)) and not low:find("tooltip", 1, true)
+            and not low:find("weakaura", 1, true) and not low:find("overlaymap", 1, true) and true or false
+    end
+    if not aura or (name and Keep.AURA_SKIP[name]) then return end
+    local w, h = f:GetSize()
+    if (w or 0) >= uw * 0.6 or (h or 0) >= uh * 0.6 then return end
+    return true, name
+end
+function Keep.AuraFrames()
+    if Keep.auraFrames and Keep.auraScanAt == Zone.opening then return Keep.auraFrames end
+    Keep.auraScanAt = Zone.opening
+    local found = {}
+    local uw, uh = UIParent:GetSize()
+    for _, f in ipairs({ UIParent:GetChildren() }) do
+        local ok, aura, name = pcall(AuraFrameOf, f, uw, uh)
+        if ok and aura then
+            found[#found + 1] = f
+            if type(name) == "string" then Keep.ADDON_FRAMES[name] = true end
+        end
+    end
+    Keep.auraFrames = found
+    return found
+end
+
 local function GroupFrames(group)
     local list = {}
     for _, name in ipairs(group.frames) do
         if _G[name] then list[#list + 1] = _G[name] end
+    end
+    if group.auras then
+        local seen = {}
+        for _, f in ipairs(list) do seen[f] = true end
+        for _, f in ipairs(Keep.AuraFrames()) do if not seen[f] then list[#list + 1] = f end end
     end
     if group.chat then
         for i = 1, (NUM_CHAT_WINDOWS or 10) do
@@ -365,7 +414,7 @@ end
 -- Other addons' frames: an addon may hide its own frames, even protected ones, out of combat (the
 -- game's own protected frames are left alone: hiding them from an addon caused trouble). Kept
 -- hidden while the map is open: if the addon shows one again, it's hidden again at once.
-Keep.ADDON_FRAMES = { MirrorBarsFrame = true }
+Keep.ADDON_FRAMES = { MirrorBarsFrame = true, EnhanceQoLCustomBuffFrameAnchor = true, EnhanceQoLCustomDebuffFrameAnchor = true }
 function Keep.AddonFrame(f)
     local name = f.GetName and f:GetName()
     return name and Keep.ADDON_FRAMES[name] or false
@@ -1227,6 +1276,8 @@ end
 
 local function Restore()
     if not ns.compact then return end
+    -- (Sticky map closed by anything but its X, Close: the normal map taking over, M, another window: back again)
+    local back = db.sticky and not Keep.closing
     Keep.GiveOMFade()
     Keep.moveFader:Hide()
     Keep.moveFaded = 1
@@ -1273,6 +1324,50 @@ local function Restore()
         map:ClearAllPoints()
         if UpdateUIPanelPositions then UpdateUIPanelPositions(map) end
     end
+    if back then Keep.StickyBack() end
+end
+
+-- Sticky map, closed by something else: opened again once the map is free (at once if it's closed; as the normal
+-- map closes if that took it over; as the fight ends if the game protects it in this one). Not more than once a
+-- second, in case something keeps closing it.
+function Keep.StickyBack()
+    Keep.stickyWait, Keep.stickyJust = true, true -- (stickyJust: till the next frame, for TakenOver)
+    C_Timer.After(0, function()
+        Keep.stickyJust = nil
+        Keep.TryStickyBack()
+    end)
+end
+function Keep.TryStickyBack()
+    if not Keep.stickyWait then return end
+    local map = Map()
+    if ns.compact or not db.sticky or not map then Keep.stickyWait = nil return end
+    if map:IsShown() then return end -- (the normal map up: tried again as it closes, HookMap)
+    if InCombatLockdown() and map:IsProtected() then return end -- (as the fight ends)
+    if Keep.stickyAt and GetTime() - Keep.stickyAt < 1 then Keep.stickyWait = nil return end
+    Keep.stickyWait = nil
+    Keep.stickyAt = GetTime()
+    ns.Open()
+end
+
+-- The normal map asked for (M, L, a quest link) while Overlay Map shows it: the game takes over. With Sticky map,
+-- the map shown directly is only closed by that (outside the game's window system, M closes it): the normal map is
+-- opened then, and Sticky map comes back as it closes (Keep.TryStickyBack).
+local function TakenOver()
+    -- (open, or just closed by this same action: M hides a map shown directly, and its hide came first, Restore)
+    local sticky = (ns.compact and db.sticky) or (db.sticky and Keep.stickyJust)
+    Restore()
+    if not sticky then return end
+    Keep.stickyJust = nil
+    Keep.stickyWait = nil -- (not at once: the normal map first)
+    C_Timer.After(0, function()
+        local map = Map()
+        if ns.compact or not db.sticky or not map then return end
+        if not map:IsShown() and not InCombatLockdown() and map.HandleUserActionOpenSelf then
+            pcall(map.HandleUserActionOpenSelf, map)
+        end
+        Keep.stickyWait = true
+        Keep.TryStickyBack() -- (waits while the normal map is up; at once if it couldn't open)
+    end)
 end
 
 local function Open()
@@ -1328,6 +1423,16 @@ local function Open()
         Keep.combatMismatch = Keep.directShown and OpenMapLoaded() or false
         Keep.markersDirty = true -- (the game's markers hidden on the next upkeep: ApplyOnlyMe)
         P.why = "shown directly (in combat)"
+        small = nil
+    elseif db.sticky then
+        -- (Sticky map: shown directly too, outside the game's window system, whose Escape closes every window it
+        -- opened, and which closes the map as other windows open; only its X closes it, Close)
+        ok = pcall(map.Show, map)
+        Keep.directShown = ok and map:IsShown()
+        if Keep.directShown and map.IsMaximized and map:IsMaximized() then
+            ok = pcall(map.SetDisplayState, map, DISPLAY_MINIMIZED_NO_LOG) -- (left full screen by the normal map)
+        end
+        P.why = "shown directly (Sticky map)"
         small = nil
     elseif small then
         ok = pcall(small, map)
@@ -1442,10 +1547,12 @@ ns.Open = Open
 local function Close()
     if not ns.compact then return end
     Keep.EscapeOn(false)
+    Keep.stickyWait = nil
     local map = Map()
     if InCombatLockdown() and map:IsProtected() then Zone.Shelve() return end
     -- (Ready in combat with OpenMap: kept, unseen, till the fight ends, so opening it again in the fight shows it set up)
     if InCombatLockdown() and db.combatReady and OpenMapDrives() and not Keep.combatMismatch then Zone.Shelve() return end
+    Keep.closing = true -- (closed on purpose: Sticky map doesn't open it again, Restore)
     -- (shown directly in combat: hidden directly too, the window system never having had it)
     if Keep.directShown or InCombatLockdown() then
         pcall(map.Hide, map)
@@ -1454,9 +1561,10 @@ local function Close()
         if HideUIPanel then pcall(HideUIPanel, map) else map:Hide() end
     end
     Keep.directShown, Keep.combatMismatch = false, false
-    if map:IsShown() and InCombatLockdown() then Zone.Shelve() return end -- (refused without a word)
+    if map:IsShown() and InCombatLockdown() then Keep.closing = false Zone.Shelve() return end -- (refused without a word)
     Zone.Unshelve(false)
     Restore() -- in case hiding did not reach the OnHide hook
+    Keep.closing = false
 end
 ns.Close = Close
 Keep.Close = Close
@@ -1478,6 +1586,8 @@ function Keep.EscapeOn(on)
         end)
         Keep.escape = e
     end
+    if db and db.sticky then on = false end -- (Sticky map: only its X closes it)
+    if e:IsShown() == (on and true or false) then return end
     Keep.escQuiet = true
     e:SetShown(on and true or false)
     Keep.escQuiet = false
@@ -1500,9 +1610,11 @@ function Keep.OpeningView()
     else
         Zone.CheckFit(true) -- (a new zone since it last closed: fitted to it instead)
     end
+    -- (Auto-zoom my arrow: zoomed in on you, over the last zoom and the zone; a cave or town you're in still wins)
+    local onArrow = Zone.ZoomOnArrow(true)
     -- (in a cave or a dungeon: fitted to it, over the zone; in a cave, every time the map opens, whatever zoom
     -- you left it at)
-    Zone.CheckPlaces(true, (db.zoneBorder and db.fitOpen) or Zone.inCave)
+    Zone.CheckPlaces(true, (db.zoneBorder and db.fitOpen) or Zone.inCave or onArrow)
     -- (Follow Me: the view where it keeps it, from the start)
     if db.follow then
         ns.lastX, ns.lastY = nil, nil
@@ -1522,6 +1634,8 @@ function OverlayMap_OnKey(keystate)
         end
         return
     end
+    -- (Sticky map: open, only its X closes it; the key still shows one kept unseen for a fight)
+    if db.sticky and ns.compact and not Zone.shelved then return end
     if db.mode == "hold" then
         if keystate == "down" then Open() else Close() end
     elseif keystate == "down" then
@@ -1543,10 +1657,12 @@ local function HookMap()
     end
     map:HookScript("OnShow", function() NoteMap("shown") end)
     map:HookScript("OnHide", function() NoteMap("hidden") end)
+    -- (Sticky map waiting for the normal map to close: now)
+    map:HookScript("OnHide", function() if Keep.stickyWait then C_Timer.After(0, Keep.TryStickyBack) end end)
     -- Opened the normal way (M, L, a quest link) while Overlay Map shows it: the game takes over.
     for _, method in ipairs({ "HandleUserActionToggleSelf", "HandleUserActionToggleQuestLog",
                               "HandleUserActionOpenSelf", "HandleUserActionOpenQuestLog" }) do
-        if map[method] then hooksecurefunc(map, method, Restore) end
+        if map[method] then hooksecurefunc(map, method, TakenOver) end
     end
     -- The map's picture resized (another map under OpenMap's view): the outline laid again at once
     -- (the mouse wheel on the game's map: your own zoom, kept against Fit Zone)
@@ -1728,6 +1844,7 @@ events:SetScript("OnEvent", function(self, event, name)
     elseif event == "PLAYER_REGEN_ENABLED" then
         ExtrasLeaveCombat()
         if Zone.shelved then Close() end -- (closed during combat: now for real)
+        if Keep.stickyWait then C_Timer.After(0.2, Keep.TryStickyBack) end -- (Sticky map, kept from opening in the fight)
         C_Timer.After(0.1, Zone.AfterCombat) -- (a fit asked for in the fight: now, after OpenMap's own catch-up)
         if Wizard.afterCombat then
             Wizard.afterCombat = nil
@@ -1787,6 +1904,7 @@ events:SetScript("OnEvent", function(self, event, name)
         if db.style ~= "standard" and db.style ~= "torn" and db.style ~= "outlines" then db.style = DEFAULTS.style end
         local corners = { TOPRIGHT = true, TOPLEFT = true, BOTTOMRIGHT = true, BOTTOMLEFT = true }
         if not corners[db.buttonCorner] then db.buttonCorner = DEFAULTS.buttonCorner end
+        if not corners[db.stickyCorner] then db.stickyCorner = DEFAULTS.stickyCorner end
         if db.buttonMode ~= "show" and db.buttonMode ~= "hover" and db.buttonMode ~= "hide" then
             db.buttonMode = "hover"
         end

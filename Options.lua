@@ -221,6 +221,8 @@ end
 
 -- Each option's line of help, shown when hovering it in the small panel and the setup wizard
 Keep.TIPS = {
+    sticky = "The map stays open until you click its small X. The key and Escape don't close it.",
+    stickyCorner = "The corner of the map the X sits in.",
     moveFadeFlight = "With Fade while moving: the map doesn't fade while you're on a flight.",
     overlay = "The map fills the whole screen, see-through and click-through. It keeps settings of its own.",
     scale = "Size of the map. Applied when you let go of the slider.",
@@ -246,9 +248,11 @@ Keep.TIPS = {
     follow = "Keeps the map centred on you as you move. It holds still while the mouse is over the map.",
     fitPlaces = "Entering a cave or mine, the map zooms in on it, and back out as you leave.",
     fitFlights = "Auto-zoom to zone during flights too: each zone you fly into fits the map, and flying out of a town fits its zone. Towns aren't zoomed into on the way. Off: the map waits until you land.",
-    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
+    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. My arrow: zoomed in on you every time the map opens. Choose any of them.",
     fitTowns = "Entering a town (a place with an innkeeper or flight master), the map zooms in on it, and back out as you leave.",
     townSize = "How much the map shows around a town it zooms in on, in yards across.",
+    fitArrow = "Every time the map opens, it zooms in on your arrow, over the zoom it had and your zone. A cave or town you're in still zooms in on that.",
+    arrowZoom = "How much the map shows around you as it opens, in yards across.",
     liveMinimap = "Inside dungeons, the game's own minimap (with your arrow) shown big in the map's place. It doesn't fade while you move.",
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next hides it.",
 }
@@ -835,6 +839,10 @@ local function BuildPanel()
     tab = "Behavior"
     Head("Controls")
     PanelCycle(Row(32), "mode", "Key", Wizard.MODE_CHOICES)
+    PanelCheck(Row(28), "sticky", "Sticky map")
+    Sub(function()
+        PanelCycle(Row(32, function() return db.sticky end), "stickyCorner", "X corner", Keep.CORNER_CHOICES)
+    end)
     PanelCheck(Row(28), "clickThrough", "Click through the map (Shift: use it)")
     PanelCheck(Row(28), "follow", "Center on me")
     Head("Places")
@@ -843,6 +851,8 @@ local function BuildPanel()
     Sub(function()
         PanelSlider(Row(56, function() return OpenMapLoaded() and db.fitTowns end), "townSize", "Town zoom", 200, 1000, 50, nil,
             function(v) return string.format("%d yd", v + 0.5) end)
+        PanelSlider(Row(56, function() return OpenMapLoaded() and db.fitArrow end), "arrowZoom", "Arrow zoom", 100, 2000, 50,
+            nil, function(v) return string.format("%d yd", v + 0.5) end)
     end)
     PanelCheck(Row(28), "liveMinimap", "Minimap as map in dungeons")
     ns.panel.rows = rows
@@ -925,6 +935,7 @@ Keep.PLACE_ITEMS = {
     { "fitPlaces", "Caves and mines", "Caves" },
     { "fitTowns", "Towns", "Towns" },
     { "fitFlights", "Zones on flights", "Flights" },
+    { "fitArrow", "My arrow, as the map opens", "My arrow" },
 }
 Keep.FIT_ITEMS = {
     { "fitEnter", "Entering a zone", "Entering" },
@@ -1582,25 +1593,30 @@ end
 -- In the map's top right corner; when the map is bigger than the screen there (a large Size or
 -- Width, or moved near an edge), in the corner of the part of the map that's on screen, so it can
 -- always be reached.
-ns.PlaceMapButton = function()
+-- Where a button goes in a corner of the map: nil while that corner is on screen (anchored to the map), else the
+-- spot (UIParent's bottom left) of that corner of the part of the map on screen, with room for a button that size
+local function CornerSpot(corner, size)
     local c = Canvas()
-    local corner = db.buttonCorner or "TOPRIGHT"
     local right, top = corner:find("RIGHT") ~= nil, corner:find("TOP") ~= nil
     local k = c:GetEffectiveScale() / UIParent:GetEffectiveScale()
     local r, t, l, b = c:GetRight(), c:GetTop(), c:GetLeft(), c:GetBottom()
     local w, h = UIParent:GetWidth(), UIParent:GetHeight()
-    local x, y
-    if r and t then
-        r, t, l, b = r * k, t * k, l * k, b * k
-        if (right and r > w) or (not right and l < 0) or (top and t > h) or (not top and b < 0) then
-            -- the corner of the part of the map on screen (and room for the button in it)
-            local room = db.buttonSize + 8
-            local vl, vr = math.max(l, 0), math.min(r, w)
-            local vb, vt = math.max(b, 0), math.min(t, h)
-            x = right and math.max(vr, vl + room) - 4 or math.min(vl, vr - room) + 4
-            y = top and math.max(vt, vb + room) - 4 or math.min(vb, vt - room) + 4
-        end
+    if not (r and t) then return end
+    r, t, l, b = r * k, t * k, l * k, b * k
+    if (right and r > w) or (not right and l < 0) or (top and t > h) or (not top and b < 0) then
+        local room = size + 8
+        local vl, vr = math.max(l, 0), math.min(r, w)
+        local vb, vt = math.max(b, 0), math.min(t, h)
+        return right and math.max(vr, vl + room) - 4 or math.min(vl, vr - room) + 4,
+            top and math.max(vt, vb + room) - 4 or math.min(vb, vt - room) + 4
     end
+end
+
+ns.PlaceMapButton = function()
+    local c = Canvas()
+    local corner = db.buttonCorner or "TOPRIGHT"
+    local right, top = corner:find("RIGHT") ~= nil, corner:find("TOP") ~= nil
+    local x, y = CornerSpot(corner, db.buttonSize)
     local want = corner .. (x and (":" .. math.floor(x * 10) .. ":" .. math.floor(y * 10)) or ":map")
     if ns.mapButton.placedAt == want and ns.mapButton:GetNumPoints() > 0 then return end
     ns.mapButton.placedAt = want
@@ -1611,9 +1627,99 @@ ns.PlaceMapButton = function()
         ns.mapButton:SetPoint(corner, c, corner, right and -4 or 4, top and -4 or 4)
     end
     if ns.panel and ns.panel:IsShown() then PlacePanel() end
+    if Keep.closeButton and Keep.closeButton:IsShown() then Keep.PlaceCloseButton() end
+end
+
+-- Sticky map's X: a small close button in a corner of the map, the only way the map closes while Sticky map is on.
+-- It shows as the panel button does (with the mouse over the map, or always with Always; never hidden for good, it's
+-- the way out), a little smaller, and in the panel button's corner it sits beside it.
+local function CloseWanted()
+    return ns.compact and db.sticky and not Zone.shelved and not ns.settling or false
+end
+local function CloseSize() return math.max(14, math.floor(db.buttonSize * 0.8 + 0.5)) end
+local function CloseAlpha()
+    local b, near = Keep.closeButton, CloseSize()
+    if b:IsMouseOver(near, -near, -near, near) then return db.buttonNearOpacity end
+    if db.buttonMode == "show" or Canvas():IsMouseOver() then return db.buttonOpacity end
+    return 0
+end
+function Keep.PlaceCloseButton()
+    local b = Keep.closeButton
+    local corner = db.stickyCorner or "TOPLEFT"
+    local right, top = corner:find("RIGHT") ~= nil, corner:find("TOP") ~= nil
+    local size = CloseSize()
+    -- (beside the panel button, toward the middle, when they share a corner)
+    local shift = 0
+    if corner == (db.buttonCorner or "TOPRIGHT") and ButtonWanted() then shift = db.buttonSize + 4 end
+    local dx = right and -(4 + shift) or (4 + shift)
+    local x, y = CornerSpot(corner, size + shift)
+    local want = corner .. ":" .. shift .. (x and (":" .. math.floor(x * 10) .. ":" .. math.floor(y * 10)) or ":map")
+    if b.placedAt == want and b:GetNumPoints() > 0 then return end
+    b.placedAt = want
+    b:ClearAllPoints()
+    if x then
+        b:SetPoint(corner, UIParent, "BOTTOMLEFT", x + (right and -shift or shift), y)
+    else
+        b:SetPoint(corner, Canvas(), corner, dx, top and -4 or 4)
+    end
+end
+local function BuildCloseButton()
+    local b = CreateFrame("Button", "OverlayMapCloseButton", UIParent)
+    b:SetClampedToScreen(true)
+    local bg = b:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0, 0, 0, 0.6)
+    local x = b:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    x:SetPoint("CENTER", 0, 0)
+    x:SetText("x")
+    b.x = x
+    b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+    b:SetScript("OnClick", function() if ns.compact then Close() end end)
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine("Close the map")
+        GameTooltip:AddLine("Sticky map is on: the key and Escape don't close it.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", GameTooltip_Hide)
+    local acc = 0
+    b:SetScript("OnUpdate", function(self, elapsed)
+        acc = acc + elapsed
+        if acc < 0.1 then return end
+        acc = 0
+        local a = CloseAlpha()
+        if math.abs(self:GetAlpha() - a) > 0.001 then self:SetAlpha(a) end
+    end)
+    Keep.closeButton = b
+end
+function Keep.UpdateCloseButton()
+    -- (Escape as Sticky map says, it may have just been turned on or off with the map open)
+    if ns.compact and not Zone.shelved then Keep.EscapeOn(true) end
+    if not CloseWanted() then
+        if Keep.closeButton then Keep.closeButton:Hide() end
+        return
+    end
+    if not Keep.closeButton then BuildCloseButton() end
+    local b, size = Keep.closeButton, CloseSize()
+    b:SetSize(size, size)
+    local font = b.x:GetFont()
+    if font then b.x:SetFont(font, math.max(10, math.floor(size * 0.75)), "OUTLINE") end
+    b.placedAt = nil
+    Keep.PlaceCloseButton()
+    if not b.recheck then
+        b.recheck = true
+        C_Timer.After(0, function()
+            b.recheck = nil
+            if b:IsShown() then b.placedAt = nil Keep.PlaceCloseButton() end
+        end)
+    end
+    b:SetFrameStrata("FULLSCREEN")
+    b:SetAlpha(CloseAlpha())
+    b:Show()
 end
 
 ns.UpdateMapButton = function()
+    Keep.UpdateCloseButton()
     if not ButtonWanted() then
         if ns.mapButton then ns.mapButton:Hide() end
         if ns.panel and not ns.compact then ns.panel:Hide() end
@@ -1871,6 +1977,12 @@ function Keep.ListOptions()
         container:Add("press", "Toggle")
         return container:GetData()
     end, "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next one hides it.")
+    local stickyInit = Settings.CreateCheckbox(P.cat, Register("sticky", "Sticky map"), Keep.DESC.sticky)
+    Under(stickyInit, Settings.CreateDropdown(P.cat, Register("stickyCorner", "Close button corner"), function()
+        local container = Settings.CreateControlTextContainer()
+        for _, c in ipairs(Keep.CORNER_CHOICES) do container:Add(c[1], c[2]) end
+        return container:GetData()
+    end, Keep.DESC.stickyCorner), function() return db.sticky end)
     Under(overlayInit, Slider("scale", "Size", "Size of the map. In full-screen overlay, the map fills the screen instead.", 0.3, 2.5, 0.05), NotOverlay)
     Under(overlayInit, Slider("width", "Width", "Width of the map compared to its usual shape. Lower makes it "
         .. "more square; the map then zooms in to fill it, centred on you. In full-screen overlay, the map fills the screen instead.",
@@ -2003,6 +2115,17 @@ function Keep.ListOptions()
         "Needs OpenMap. Entering a town (a place with an innkeeper or flight master, not a capital), the map "
         .. "zooms in on it, and back out when you leave.")
     if townInit and townInit.AddModifyPredicate then townInit:AddModifyPredicate(OpenMapLoaded) end
+    local arrowInit = Settings.CreateCheckbox(P.cat, Register("fitArrow", NeedsOM("Auto-zoom my arrow")),
+        "Needs OpenMap. Every time the map opens, it zooms in on your arrow, over the zoom it had and your zone. A cave "
+        .. "or town you're in still zooms in on that.")
+    if arrowInit and arrowInit.AddModifyPredicate then arrowInit:AddModifyPredicate(OpenMapLoaded) end
+    do
+        local options = Settings.CreateSliderOptions(100, 2000, 50)
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(v) return string.format("%d yd", v) end)
+        local init = Settings.CreateSlider(P.cat, Register("arrowZoom", "Arrow zoom"), options,
+            "How much the map shows around you as it opens, in yards across.")
+        Under(arrowInit, init, function() return OpenMapLoaded() and db.fitArrow end)
+    end
     Settings.CreateCheckbox(P.cat, Register("liveMinimap", "Minimap as map in dungeons"),
         "Inside dungeons and raids the game doesn't let addons know where you are, so no map can show your "
         .. "arrow there. With this on, the game's own minimap (which can) is shown big in the map's place, "
@@ -2094,10 +2217,15 @@ function Keep.AddonSwitchList()
     end
     return list
 end
+Keep.CORNER_CHOICES = { { "TOPRIGHT", "Top right" }, { "TOPLEFT", "Top left" }, { "BOTTOMRIGHT", "Bottom right" },
+    { "BOTTOMLEFT", "Bottom left" } }
 Keep.DESC = {
+    hideBuffs = "The game's buffs and debuffs, and other addons' own buff and debuff icons (EnhanceQoL's, and most addons that name theirs for buffs or auras), hidden while the map is open and back when it closes.",
+    sticky = "The map stays on screen until you close it with its small X: the map key and Escape don't close it. The X shows with the mouse over the map, as the panel button does.",
+    stickyCorner = "The corner of the map the X sits in. In the panel button's corner, it sits beside it.",
     mapKey = "The key that shows the map. Click, then press the key (or a Shift, Ctrl or Alt combination). Escape cancels.",
     bugReport = "Opens a window with the link to Overlay Map's CurseForge comments and a short report of your setup (versions, where you are, settings), ready to copy and paste in your comment.",
-    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
+    fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. My arrow: zoomed in on you every time the map opens. Choose any of them.",
     overlay = "One switch for an overlay map: the map fills the whole screen, see-through and click-through, with solid markers and large soft edges. It keeps its own opacities, marker size, style and edges: what you change while it's on stays with it, and the normal map keeps its own.",
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next one hides it.",
     scale = "Size of the map. In full-screen overlay, the map fills the screen instead.",
@@ -2232,6 +2360,7 @@ function Keep.BuildTabs(canvas, O)
     preview:SetSize(24, 24)
     preview:SetPoint("TOPLEFT", 16, -47)
     local function Art(tex, atlas, file)
+        if not tex then return end
         local hasAtlas = atlas and C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(atlas)
         if hasAtlas then tex:SetAtlas(atlas) else tex:SetTexture(file) end
     end
@@ -2397,6 +2526,10 @@ function Keep.BuildTabs(canvas, O)
         "Click, then press the key (or a Shift, Ctrl or Alt combination) that shows the map. Escape cancels." } },
         nil, "Map key keybinding bind shortcut", "mapKey"):GetChildren())
     Cycle("mode", "Key", Wizard.MODE_CHOICES)
+    Check("sticky", "Sticky map")
+    Sub(function()
+        Cycle("stickyCorner", "Close button corner", Keep.CORNER_CHOICES, function() return db.sticky end)
+    end)
     Check("rememberZoom", "Open at last zoom")
     Head("Size and place")
     Check("overlay", "Full-screen overlay")
@@ -2477,8 +2610,8 @@ function Keep.BuildTabs(canvas, O)
     Head("Places")
     do
         local name = Keep.NeedsOMName("Auto-zoom")
-        local f = Row(30, "fitPlacesList", name .. " caves mines towns flights", OpenMapLoaded)
-        f.keys = { "fitPlaces", "fitTowns", "fitFlights" }
+        local f = Row(30, "fitPlacesList", name .. " caves mines towns flights my arrow player", OpenMapLoaded)
+        f.keys = { "fitPlaces", "fitTowns", "fitFlights", "fitArrow" }
         Keep.PanelMulti(f, "fitPlacesList", name, Keep.PLACE_ITEMS, OpenMapLoaded)
     end
     Sub(function()
@@ -2486,6 +2619,9 @@ function Keep.BuildTabs(canvas, O)
             function(v) return string.format("%d yd", v + 0.5) end)
         -- (shown only with towns ticked, not just greyed)
         O.rows[#O.rows].showIf = function() return db.fitTowns end
+        Slider("arrowZoom", "Arrow zoom", 100, 2000, 50, function() return OpenMapLoaded() and db.fitArrow end, nil,
+            function(v) return string.format("%d yd", v + 0.5) end)
+        O.rows[#O.rows].showIf = function() return db.fitArrow end
     end)
     Check("liveMinimap", "Minimap as map in dungeons")
     -- (still being worked on: last in the tab, under its own title, and only here, not in the small panel)
@@ -2504,8 +2640,7 @@ function Keep.BuildTabs(canvas, O)
 
     tab = "Panel button"
     Cycle("buttonMode", "Panel button", { { "hover", "On hover" }, { "show", "Always" }, { "hide", "Hidden" } })
-    Cycle("buttonCorner", "Corner", { { "TOPRIGHT", "Top right" }, { "TOPLEFT", "Top left" },
-        { "BOTTOMRIGHT", "Bottom right" }, { "BOTTOMLEFT", "Bottom left" } })
+    Cycle("buttonCorner", "Corner", Keep.CORNER_CHOICES)
     Slider("buttonOpacity", "Opacity", 0, 1, 0.05)
     Slider("buttonNearOpacity", "Opacity up close", 0, 1, 0.05)
     Slider("buttonSize", "Size", 14, 48, 1, nil, nil, function(v) return string.format("%d", v + 0.5) end)

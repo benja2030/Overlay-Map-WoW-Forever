@@ -2457,6 +2457,19 @@ function Zone.TownHere(wasIn)
     return su / n, sv / n
 end
 
+-- Auto-zoom my arrow (db.fitArrow): as the map opens, the view centred on you, db.arrowZoom yards across. With
+-- OpenMap's world, as the other places; true if it zoomed
+function Zone.ZoomOnArrow(instant)
+    if not db.fitArrow or not Zone.OpenMapStitched() then return false end
+    local u, v = Zone.PlayerWorld()
+    if not u then return false end
+    local half = (db.arrowZoom or 600) / 2 * Zone.WorldPerYard()
+    local fit = Zone.ZoomForBox(u - half, u + half, v - half, v + half)
+    if not fit then return false end
+    Zone.ViewTo(u, v, fit, instant)
+    return true
+end
+
 function Zone.CheckTown(instant, force, mine)
     if not db.fitTowns or not Zone.OpenMapStitched() then
         Zone.townFor = nil
