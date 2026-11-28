@@ -66,6 +66,8 @@ local DEFAULTS = {
     buttonOpacity = 0.8,     -- with the mouse over the map (or always, with "show")
     buttonNearOpacity = 1,   -- with the mouse on the button or right next to it
     buttonSize = 22,
+    -- other addons on the map while Overlay Map shows it (Addons.lua): off, kept off it till the map closes
+    showQuestie = true, showWaypoints = true, showOpenMap = true, showOpenMapIcons = true, showDungeonJournal = true,
     buttonCorner = "TOPRIGHT", -- the map's corner it sits in: TOPRIGHT, TOPLEFT, BOTTOMRIGHT, BOTTOMLEFT
     x = 0, y = 0,    -- position of the map's centre, from the centre of the screen
 }
@@ -197,6 +199,12 @@ local function OpenMapLoaded()
     return loaded and loaded("OpenMap") and true or false
 end
 ns.OpenMapLoaded = OpenMapLoaded
+-- OpenMap there and laying its world over the map: not while its map is kept off Overlay Map's (the Addons tab,
+-- Addons.lua), when the map is the game's own as without OpenMap. (Its window is still OpenMap's: OpenMapLoaded)
+local function OpenMapDrives()
+    return OpenMapLoaded() and not (ns.Addons and ns.Addons.OpenMapHeld()) or false
+end
+ns.OpenMapDrives = OpenMapDrives
 
 -- The map area is put at Overlay Map's spot, from the middle of the screen. The game draws the
 -- map window as one picture cut to the window's own rectangle, so the map area only shows where
@@ -775,7 +783,7 @@ end
 function Zone.PreSize()
     -- (with OpenMap only: that's where a layout is slow, and without it the game's zoom levels
     -- are trimmed for Overlay Map's look, which needs the map open as Overlay Map's first)
-    if not Zone.presizing or not Zone.orig or not OpenMapLoaded() then return end
+    if not Zone.presizing or not Zone.orig or not OpenMapDrives() then return end
     local c = Canvas()
     if not c then return end
     if not before.points then
@@ -797,7 +805,7 @@ end
 -- the furthest zoom is the one where the map fills the area. (OpenMap shows the world around the
 -- zone, so it has no margins.)
 local function TrimZoomLevels(c)
-    if not ns.compact or OpenMapLoaded() or type(c.zoomLevels) ~= "table" or not c.mapID then return end
+    if not ns.compact or OpenMapDrives() or type(c.zoomLevels) ~= "table" or not c.mapID then return end
     local layers = C_Map.GetMapArtLayers(c.mapID)
     local art = layers and layers[1]
     if not art or not art.layerWidth or art.layerWidth == 0 or art.layerHeight == 0 then return end
@@ -825,7 +833,7 @@ local function RestoreSize()
     c:ClearAllPoints()
     c:SetSize(before.cw, before.ch)
     for _, pt in ipairs(before.points) do c:SetPoint(unpack(pt)) end
-    if not OpenMapLoaded() and map.OnFrameSizeChanged then
+    if not OpenMapDrives() and map.OnFrameSizeChanged then
         -- (the game's map works out its zoom levels again, as they were)
         pcall(map.OnFrameSizeChanged, map)
     elseif appliedW and appliedW ~= before.cw and Zone.presizeWorks and not map:IsShown() then
@@ -1248,6 +1256,8 @@ local function Restore()
     ns.ApplyMarkerSize() -- (compact is off: markers back to their size)
     ns.ApplyArrow()      -- (... and your arrow)
     wipe(iconLayers)
+    -- (the addons kept off it back on the map, its size back first: OpenMap lays its world over it again)
+    ns.Addons.Release()
     ns.settling = false
     map:SetAlpha(before.alpha or 1)
     if before.mouse then map:EnableMouse(true) end
@@ -1278,6 +1288,8 @@ local function Open()
     local t0 = debugprofilestop()
     if map:IsShown() then return end -- already open the normal way: leave it alone
     if Blocked() then return end
+    -- (the addons turned off in the Addons tab kept off the map, before it opens: Addons.lua)
+    ns.Addons.Hold()
     Keep.HoldOMFade()
 
     -- Open it small and without the quest log. The game decides small or full screen from
@@ -1339,6 +1351,7 @@ local function Open()
     if mini ~= "1" then pcall(SetCVar, "miniWorldMap", mini) end
     if not ok or not map:IsShown() then
         if Zone.presized then RestoreSize() wipe(before) Zone.presized = nil end -- (sized for nothing)
+        ns.Addons.Release()
         return
     end
 
@@ -1432,7 +1445,7 @@ local function Close()
     local map = Map()
     if InCombatLockdown() and map:IsProtected() then Zone.Shelve() return end
     -- (Ready in combat with OpenMap: kept, unseen, till the fight ends, so opening it again in the fight shows it set up)
-    if InCombatLockdown() and db.combatReady and OpenMapLoaded() and not Keep.combatMismatch then Zone.Shelve() return end
+    if InCombatLockdown() and db.combatReady and OpenMapDrives() and not Keep.combatMismatch then Zone.Shelve() return end
     -- (shown directly in combat: hidden directly too, the window system never having had it)
     if Keep.directShown or InCombatLockdown() then
         pcall(map.Hide, map)

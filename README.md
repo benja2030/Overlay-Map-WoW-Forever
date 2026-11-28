@@ -65,6 +65,7 @@ All the options are in **Options > AddOns > Overlay Map**, on tabs, with a searc
 
 - **OpenMap**: works with it. OpenMap keeps the map window where it saved it, so Overlay Map moves only the map inside it. Leave OpenMap's own "fade while moving" at 0 and use Overlay Map's instead, or the two will fight while you walk. With OpenMap, changing the width shows more or less of the world at the sides instead of zooming.
 - **Questie**: its markers show on the map and take the markers' opacity.
+- **Choosing which addons show**: the Addons tab has a switch for Questie, TomTom and RXPGuides, OpenMap's map, OpenMap's icons and Dungeon Journal's dungeon maps. One turned off is kept off Overlay Map's map while it's open, so the map opens faster; the normal map keeps it. Opened in a fight, the map shows every addon.
 - **SexyMap**: its minimap (with its clock, zone name and buttons) is hidden with the rest.
 - **Mirror Bars**: its copies of the action bars are hidden along with the action bars.
 
@@ -154,6 +155,7 @@ Todas las opciones están en **Opciones > AddOns > Overlay Map**, en pestañas, 
 
 - **OpenMap**: funciona con él. OpenMap mantiene la ventana del mapa donde la guardó, así que Overlay Map mueve solo el mapa que está dentro. Deja el "desvanecer al moverse" de OpenMap en 0 y usa el de Overlay Map, o los dos pelearán mientras caminas. Con OpenMap, cambiar el ancho muestra más o menos mundo a los lados en vez de hacer zoom.
 - **Questie**: sus indicadores se ven en el mapa y usan la opacidad de los objetivos.
+- **Elegir qué addons se ven**: la pestaña Addons tiene un interruptor para Questie, TomTom y RXPGuides, el mapa de OpenMap, los íconos de OpenMap y los mapas de mazmorra de Dungeon Journal. Uno apagado no aparece en el mapa de Overlay Map mientras está abierto, así que el mapa abre más rápido; el mapa normal lo mantiene. Abierto en un combate, el mapa muestra todos los addons.
 - **SexyMap**: su minimapa (con su reloj, nombre de zona y botones) se oculta junto con lo demás.
 - **Mirror Bars**: sus copias de las barras de acción se ocultan junto con las barras de acción.
 

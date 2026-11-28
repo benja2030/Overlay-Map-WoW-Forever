@@ -253,10 +253,12 @@ Keep.TIPS = {
     mode = "Hold to show: the map shows while you hold the key. Toggle: one press shows it, the next hides it.",
 }
 
--- A tooltip on a control (its text: the option's line of help, or `text`)
+-- A tooltip on a control (its text: the option's line of help, or `text`; frame.tipKey: a key set later, for a
+-- control used for several options)
 function Keep.Tip(frame, key, text)
     frame:HookScript("OnEnter", function(self)
-        local tip = (frame.offTip and frame.IsEnabled and not frame:IsEnabled() and frame.offTip) or text or Keep.TIPS[key]
+        local tip = (frame.offTip and frame.IsEnabled and not frame:IsEnabled() and frame.offTip) or text
+            or Keep.TIPS[key or frame.tipKey or ""]
         if not tip then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText(tip, 1, 1, 1, 1, true)
@@ -474,8 +476,9 @@ local function PanelCheck(parent, key, label, enabledIf, offLabel, offTip)
 end
 
 -- A list of switches in a drop-down: "Label: Choice, Choice  v", a click opens the list with a checkbox each
--- (items: { key, label, short }), any number of them on. One list window, shared, closed by a click elsewhere
--- or Escape.
+-- (items: { key, label, short [, here = function, off = label] }: here false greys it out, with the off label),
+-- any number of them on. One list window, shared, closed by a click elsewhere or Escape. An owner with menuRight
+-- has it opening under its right edge.
 Keep.MULTI_W = 230
 function Keep.MultiMenu()
     if Keep.multi then return Keep.multi end
@@ -514,18 +517,38 @@ function Keep.OpenMulti(owner, items, onChange)
         end
         b:ClearAllPoints()
         b:SetPoint("TOPLEFT", 8, -8 - (i - 1) * 26)
-        b.text:SetText(item[2])
-        b:SetChecked(db[item[1]] and true or false)
+        b:SetMotionScriptsWhileDisabled(true)
         b:SetScript("OnClick", function(self)
             db[item[1]] = self:GetChecked() and true or false
             onChange()
+            m.Update() -- (one may grey out another)
         end)
-        Keep.Tip(b, item[1])
+        if not b.tipped then b.tipped = true Keep.Tip(b, nil) end
+        b.tipKey = item[1]
         b:Show()
     end
-    m:SetSize(Keep.MULTI_W, 16 + #items * 26)
+    -- each box as its setting is, greyed out when its item says so
+    function m.Update()
+        for i, item in ipairs(items) do
+            local b = m.boxes[i]
+            local on = not item.here or item.here()
+            b:SetEnabled(on)
+            b:SetChecked(on and db[item[1]] and true or false)
+            b.text:SetText(on and item[2] or (item.off or item[2]))
+            b.text:SetFontObject(on and "GameFontHighlight" or "GameFontDisable")
+        end
+    end
+    m.Update()
+    -- (wide enough for its longest name)
+    local w = Keep.MULTI_W
+    for i = 1, #items do w = math.max(w, m.boxes[i].text:GetStringWidth() + 50) end
+    m:SetSize(w, 16 + #items * 26)
     m:ClearAllPoints()
-    m:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+    if owner.menuRight then
+        m:SetPoint("TOPRIGHT", owner, "BOTTOMRIGHT", 0, -2)
+    else
+        m:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+    end
     m.owner = owner
     -- (over the menu it opens from: in the same layer as the small panel, it was drawn under the panel's
     -- own rows, the options below showing through it)
@@ -1809,6 +1832,7 @@ function Keep.ListOptions()
             { "Style", "Map style, Fade at the edges, Edge shape, and the Outlines style's lines." },
             { "Zone borders", "The map cut to your zone's outline, and how it fits and follows the zone." },
             { "Behavior", "Click through the map, Center on me, Auto-zoom caves, Minimap as map, and what to hide while the map is open." },
+            { "Addons", "Which other map addons show on Overlay Map's map." },
             { "Panel button", "The button on the map that opens the small panel." },
         }) do
             Button(item[1], "Open", function() Keep.OpenPage(item[1]) end, item[2])
@@ -2010,6 +2034,11 @@ function Keep.ListOptions()
         .. "were when it closes. The game doesn't allow changing them in combat: then they're hidden, or "
         .. "come back, when combat ends.")
 
+    Page("Addons")
+    for _, s in ipairs(Keep.AddonSwitchList()) do
+        if s.here() then Settings.CreateCheckbox(P.cat, Register(s.key, s.label), Keep.ADDONS_TIP) end
+    end
+
     Page("Panel button")
     Settings.CreateDropdown(P.cat, Register("buttonMode", "Panel button"), function()
         local container = Settings.CreateControlTextContainer()
@@ -2052,7 +2081,21 @@ end
 -- page of an addon's own, or with Keep.USE_TABS off.)
 Keep.USE_TABS = true
 Keep.OPTION_TABS = { "General", "Markers", "Style", "Zone borders", "Behavior", "Hide while open", "Panel button" }
+-- Addons on the map: one switch per map addon (Addons.lua), greyed out when it isn't here
+Keep.ADDONS_TIP = "Which other map addons show on Overlay Map's map. One turned off is kept off it while it's open, "
+    .. "so the map opens faster; the normal map keeps it. Opened in a fight, the map shows every addon."
+function Keep.AddonSwitchList()
+    local list = {}
+    for _, s in ipairs(ns.Addons.LIST) do
+        local name = type(s.name) == "function" and s.name() or s.name
+        local off = name .. " (not installed)"
+        if s.key == "showOpenMapIcons" and Zone.OpenMapModule() then off = name .. " (with OpenMap's map on)" end
+        list[#list + 1] = { s.key, name, key = s.key, label = name, here = s.here, off = off }
+    end
+    return list
+end
 Keep.DESC = {
+    mapKey = "The key that shows the map. Click, then press the key (or a Shift, Ctrl or Alt combination). Escape cancels.",
     bugReport = "Opens a window with the link to Overlay Map's CurseForge comments and a short report of your setup (versions, where you are, settings), ready to copy and paste in your comment.",
     fitPlacesList = "Zooms the map in on places as you enter them, and back out as you leave: caves and mines, towns (a place with an innkeeper or flight master), and the zones you fly over on a flight. Choose any of them.",
     overlay = "One switch for an overlay map: the map fills the whole screen, see-through and click-through, with solid markers and large soft edges. It keeps its own opacities, marker size, style and edges: what you change while it's on stays with it, and the normal map keeps its own.",
@@ -2183,22 +2226,54 @@ function Keep.BuildTabs(canvas, O)
         Keep.Tip(b, nil, tip)
         return b
     end
+    -- Open on the map: the game's own red button with the gold arrow (its map's "bigger" button), the older
+    -- client's file if this one hasn't it
+    local preview = CreateFrame("Button", nil, canvas)
+    preview:SetSize(24, 24)
+    preview:SetPoint("TOPLEFT", 16, -47)
+    local function Art(tex, atlas, file)
+        local hasAtlas = atlas and C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(atlas)
+        if hasAtlas then tex:SetAtlas(atlas) else tex:SetTexture(file) end
+    end
+    preview:SetNormalTexture("Interface\\Buttons\\UI-Panel-BiggerButton-Up")
+    preview:SetPushedTexture("Interface\\Buttons\\UI-Panel-BiggerButton-Down")
+    preview:SetHighlightTexture("Interface\\Buttons\\UI-Panel-BiggerButton-Highlight", "ADD")
+    Art(preview:GetNormalTexture(), "RedButton-Expand", "Interface\\Buttons\\UI-Panel-BiggerButton-Up")
+    Art(preview:GetPushedTexture(), "RedButton-Expand-Pressed", "Interface\\Buttons\\UI-Panel-BiggerButton-Down")
+    Art(preview:GetHighlightTexture(), "RedButton-Highlight", "Interface\\Buttons\\UI-Panel-BiggerButton-Highlight")
+    preview:SetScript("OnClick", function() Keep.Preview() end)
+    Keep.Tip(preview, nil, "Open on the map: closes this window and opens the map with its small options panel, to "
+        .. "change the main options while you see them (the game doesn't let the map and this window be open together).")
     local wizard = TopButton("Setup wizard", 120, function() Wizard.Open() end,
         "The map key and the main options in a few steps, with the map open to see each change.")
-    wizard:SetPoint("TOPLEFT", 16, -48)
-    local preview = TopButton("Open on the map", 130, function() Keep.Preview() end,
-        "Closes this window and opens the map with its small options panel, to change the main options while you see "
-        .. "them (the game doesn't let the map and this window be open together).")
-    preview:SetPoint("LEFT", wizard, "RIGHT", 6, 0)
-    local key = TopButton("Map key", 150, function() Keep.CatchKey() end,
-        "Click, then press the key (or a Shift, Ctrl or Alt combination) that shows the map. Escape cancels.")
-    key:SetPoint("LEFT", preview, "RIGHT", 6, 0)
+    wizard:SetPoint("LEFT", preview, "RIGHT", 6, 0)
     local resetAll = TopButton("Reset everything", 130, function() StaticPopup_Show("OVERLAYMAP_RESET_ALL") end,
         "Puts every Overlay Map option back to its default (asks first; your key stays).")
-    resetAll:SetPoint("TOPRIGHT", -20, -48)
+    resetAll:SetPoint("LEFT", wizard, "RIGHT", 6, 0)
+    -- Addons on the map: a drop-down list under the search box, a switch per addon
+    local addons = CreateFrame("Button", nil, canvas, "BackdropTemplate")
+    addons:SetSize(180, 22)
+    addons:SetPoint("TOPRIGHT", -20, -48)
+    addons.menuRight = true
+    addons:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
+    addons:SetBackdropColor(1, 0.85, 0.3, 0.07)
+    addons:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight2", "ADD")
+    addons:GetHighlightTexture():SetAlpha(0.15)
+    local atext = addons:CreateFontString(nil, "OVERLAY", "GameFontNormal") -- (gold, as the buttons' text)
+    atext:SetPoint("LEFT", 8, 0)
+    atext:SetText("Addons on the map")
+    local aarrow = addons:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    aarrow:SetPoint("RIGHT", -8, 0)
+    aarrow:SetText("v")
+    Keep.Tip(addons, nil, Keep.ADDONS_TIP)
+    addons:SetScript("OnClick", function(self)
+        Keep.OpenMulti(self, Keep.AddonSwitchList(), function() Keep.RefreshAll() end)
+    end)
+    canvas:HookScript("OnHide", function() if Keep.multi and Keep.multi.owner == addons then Keep.multi:Hide() end end)
+    local key -- (the Map key button, first on the General tab)
     function O.Top()
         local k = Wizard.CurrentKey()
-        key:SetText("Map key: " .. (k and Wizard.KeyText(k) or "|cffff8040none|r"))
+        if key then key:SetText("Map key: " .. (k and Wizard.KeyText(k) or "|cffff8040none|r")) end
     end
 
     -- tabs
@@ -2318,6 +2393,9 @@ function Keep.BuildTabs(canvas, O)
 
     tab = "General"
     Head("Opening")
+    key = select(1, Buttons({ { "Map key", function() Keep.CatchKey() end,
+        "Click, then press the key (or a Shift, Ctrl or Alt combination) that shows the map. Escape cancels." } },
+        nil, "Map key keybinding bind shortcut", "mapKey"):GetChildren())
     Cycle("mode", "Key", Wizard.MODE_CHOICES)
     Check("rememberZoom", "Open at last zoom")
     Head("Size and place")

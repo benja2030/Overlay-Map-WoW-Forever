@@ -19,7 +19,7 @@ Keep.BUG_URL = "https://www.curseforge.com/wow/addons/overlay-map/comments"
 Keep.BUG_URL_GH = "https://github.com/benja2030/Overlay-Map-WoW-Forever/issues/new"
 -- (the lines of /omap debug a report keeps)
 Keep.BUG_LINES = { "debug.", "Saved:", "Where you are:", "Caves and dungeons:", "Zone border:", "Towns:", "Flights:",
-    "Ready in combat:", "Last opening:", "Dungeon Journal:", "Map-related addons loaded:" }
+    "Ready in combat:", "Last opening:", "Addons on the map:", "Dungeon Journal:", "Map-related addons loaded:" }
 function Keep.BugText()
     local lines = {}
     _G.OVERLAYMAP_CAPTURE = lines
@@ -201,6 +201,7 @@ function OverlayMap_Debug()
         Say(string.format("Edges laid: %d times in the last %d s, %.0f ms in all", cost.n,
             math.floor(GetTime() - cost.since + 0.5), cost.ms))
         Say(string.format("Last opening: %.0f ms, then %.0f ms", Zone.openMs or 0, Zone.openMs2 or 0))
+        Say(ns.Addons.DebugLine())
         local P = Zone.openParts or {}
         Say("  opened with the game's state " .. tostring(P.state or "?")
             .. (P.why and (", the small map action gave: " .. P.why) or "")

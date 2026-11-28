@@ -12,5 +12,6 @@ Core.lua
 Markers.lua
 Zones.lua
 Combat.lua
+Addons.lua
 Options.lua
 Debug.lua

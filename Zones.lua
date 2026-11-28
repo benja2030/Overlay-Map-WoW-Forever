@@ -833,11 +833,21 @@ function Zone.OMLineDrawn(line, u1, v1, u2, v2)
     Zone.omLines[line] = true
     line.omMidU, line.omMidV = (u1 + u2) / 2, (v1 + v2) / 2
     -- (a line OpenMap takes back from its pool keeps the alpha it was given here: judged again at once)
+    if ns.compact and ns.Addons.OpenMapIconsOff() then return end
     if ns.compact or Zone.omLinesFaded[line] then Zone.OMLineLook(line, ns.compact and Zone.OutsideShare() or 1) end
 end
 
 -- Every icon again (the zone, the visibility or the icons changed); share 1: all back as they were
 function Zone.OMPinsApply(share)
+    -- (OpenMap's icons and lines kept off the map, the Addons tab: only Overlay Map's own cave entrances judged;
+    -- the ones faded before are put back as the map closes, share 1)
+    if share < 1 and ns.Addons.OpenMapIconsOff() then
+        local set = Zone.mouthSet
+        for _, pin in ipairs(set and set.pins or {}) do
+            if Zone.omFaded[pin] or pin:IsShown() then Zone.OMPinLook(pin, share) end
+        end
+        return
+    end
     if share < 1 or next(Zone.omLinesFaded) then
         for line in pairs(Zone.omLines) do Zone.OMLineLook(line, share) end
     end
@@ -857,6 +867,7 @@ function Zone.HookOMPins()
     local function judge(pin)
         if not pin then return end
         Zone.omPins[pin] = true
+        if ns.compact and ns.Addons.OpenMapIconsOff() and not pin.caveName then return end
         if ns.compact and (Zone.omFaded[pin] or Zone.OutsideShare() < 1 or Zone.omAllOut) then Zone.OMPinLook(pin, Zone.OutsideShare()) end
     end
     hooksecurefunc(S, "AddPin", function(set) if type(set) == "table" and set.pins then judge(set.pins[#set.pins]) end end)

@@ -7,7 +7,7 @@ local db
 ns.dbSetters[#ns.dbSetters + 1] = function(t) db = t end
 -- From the files before this one
 local Map, Canvas, OpenMapLoaded, ShowExtras, ShowMinimap, ApplyOpacity = ns.Map, ns.Canvas, ns.OpenMapLoaded, ns.ShowExtras, ns.ShowMinimap, ns.ApplyOpacity
-local ApplyEdges, Open = ns.ApplyEdges, ns.Open
+local ApplyEdges, Open, OpenMapDrives = ns.ApplyEdges, ns.Open, ns.OpenMapDrives
 
 -- Your arrow while the map is open in a fight without Ready in combat (Keep.combatMismatch): the game's own
 -- is out of place then (it follows the game's view, which OpenMap can't set up in a fight), OpenMap's icons
@@ -126,7 +126,7 @@ end
 function Keep.CaveWheel()
     local c = Canvas()
     if not c or not c.EnableMouseWheel or (ns.compact and Zone.shelved) then return end -- (kept unseen: its mouse is off anyway)
-    local off = ns.compact and InCombatLockdown() and OpenMapLoaded() and true or false
+    local off = ns.compact and InCombatLockdown() and OpenMapDrives() and true or false
     -- (checked against the map as it is, not only what was set last: the click through puts the map's mouse back
     -- as you hold Shift, the wheel with it)
     if off then
@@ -141,7 +141,7 @@ end
 -- In a fight with OpenMap, its own quest icons instead of the game's: always with Ready in combat, and when the map
 -- was opened in the fight without it (Otherwise hide markers in fights), where the game's would be out of place
 function Keep.FightQuests()
-    if not (ns.compact and InCombatLockdown() and OpenMapLoaded()) then return false end
+    if not (ns.compact and InCombatLockdown() and OpenMapDrives()) then return false end
     -- (not with Ready in combat: the game's are placed right then, and OpenMap leaves the quests of the map under its
     -- picture to the game's markers, so hiding them left that zone without any)
     return Keep.combatMismatch and true or false
